@@ -1,0 +1,41 @@
+THIRD-PARTY NOTICES
+===================
+
+Shinobi (PS2) Recomp is free software under the GNU General Public License v3.0
+(see LICENSE). It contains or uses the following work of others.
+
+PS2Recomp (static recompiler and runtime base)
+    ran-j and contributors - https://github.com/ran-j/PS2Recomp
+    The folder devilkings-fork is that project plus this port's runtime work.
+
+PCSX2 (graphics and sound code)
+    Copyright 2002-2026 PCSX2 Dev Team - GPL-3.0-or-later - https://pcsx2.net
+    third_party/pcsx2 holds the SPU2 (sound) files used here, with this
+    port's changes marked "LOCAL PATCH" / "LOCAL DEBUG".
+    third_party/pcsx2-gs-bridge is the bridge that lets this program use PCSX2's
+    graphics core (GPL-3.0-or-later; see its own README.md and PINNED_REVISION).
+
+raylib - zlib licence - Ramon Santamaria (raysan5) and contributors
+    https://www.raylib.com
+
+Microsoft Edge WebView2 SDK - Microsoft's licence
+    Not included in this repository: download the SDK (NuGet package
+    Microsoft.Web.WebView2) into third_party/webview2 to build the launcher.
+
+FFmpeg (avcodec, avformat, avutil, avfilter, avdevice, swscale, swresample)
+    LGPL / GPL depending on the build - https://ffmpeg.org (see ffmpeg.org/legal)
+    Plays the studio intro video. Shipped as separate DLLs in the release's
+    bin folder; the source is available from ffmpeg.org.
+
+SDL, OpenEXR / Imath / Iex, FreeType, HarfBuzz, Brotli, libjxl, libwebp, zlib
+    zlib, BSD, FreeType and MIT-style licences. Shipped as DLLs in the release's
+    bin folder (used by the graphics bridge and the video player).
+
+Launcher artwork and music
+    By TheRealAfsan / Twilight Orchard.
+
+The game
+    Shinobi (c) SEGA. This repository contains no disc image, game data, music
+    or artwork of the game, and no translated game code (a release contains it
+    only inside the finished program). SEGA and PlayStation are trademarks of
+    their owners; this is an unofficial fan project.

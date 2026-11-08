@@ -1,0 +1,89 @@
+#include "iop_sysmem.h"
+
+#include "../core/iop_cpu.h"
+#include "../core/iop_memory.h"
+#include "iop_format.h"
+#include "ps2x/iop/iop_host.h"
+
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+
+namespace ps2x::iop::detail
+{
+    namespace
+    {
+        // PS2X_IOPHEAP_TRACE=1 logs IOP heap allocations and frees.
+        bool traceHeap()
+        {
+            static const bool s_trace = std::getenv("PS2X_IOPHEAP_TRACE") != nullptr;
+            return s_trace;
+        }
+    }
+
+    IopSysmem::IopSysmem(IopHost &host, IopMemory &memory) noexcept
+        : m_host(host), m_memory(memory)
+    {
+    }
+
+    bool IopSysmem::dispatchImport(uint16_t ordinal, IopCpuState &cpu)
+    {
+        const uint32_t a0 = cpu.gpr[4];
+        const uint32_t a1 = cpu.gpr[5];
+        const uint32_t a2 = cpu.gpr[6];
+        const auto setV0 = [&](uint32_t value)
+        {
+            cpu.gpr[2] = value;
+        };
+
+        switch (ordinal)
+        {
+        case 4: // AllocSysMemory
+        {
+            const uint32_t address = a0 == 2u
+                                         ? m_memory.allocate(a1, 16u, a2)
+                                         : m_memory.allocate(a1, 16u);
+            if (traceHeap())
+                std::fprintf(stderr, "[iopheap] iop-alloc mode=%u size=%x -> %x ra=%x\n", a0, a1, address, cpu.gpr[31]);
+            setV0(address);
+            return true;
+        }
+        case 5: // FreeSysMemory
+            if (traceHeap())
+                std::fprintf(stderr, "[iopheap] iop-free %x ra=%x\n", a0, cpu.gpr[31]);
+            setV0(m_memory.freeAllocation(a0) ? 0u : 0xFFFFFFFFu);
+            return true;
+        case 6: // QueryMemSize
+            setV0(IopMemory::RamSize);
+            return true;
+        case 7: // QueryMaxFreeMemSize
+        case 8: // QueryTotalFreeMemSize
+            setV0(m_memory.maxFreeMemory());
+            return true;
+        case 9: // QueryBlockTopAddress
+            if (const auto block = m_memory.allocationContaining(a0))
+                setV0(block->address);
+            else
+                setV0(0u);
+            return true;
+        case 10: // QueryBlockSize
+            if (const auto block = m_memory.allocationContaining(a0))
+                setV0(block->size);
+            else
+                setV0(0xFFFFFFFFu);
+            return true;
+        case 14: // Kprintf
+        {
+            const std::string format = formatGuestString(m_memory, cpu, a0, 5);
+            m_host.log(LogLevel::Info, std::string("[IOP Kprintf] ") + format);
+            setV0(static_cast<uint32_t>(format.size()));
+            return true;
+        }
+        case 15:
+            setV0(0u);
+            return true;
+        default:
+            return false;
+        }
+    }
+}

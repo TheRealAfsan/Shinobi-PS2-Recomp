@@ -1,0 +1,1129 @@
+#include "iop_emulator.h"
+#include "imports/iop_cdvd.h"
+#include "core/iop_cpu.h"
+#include "core/iop_cpu_execute.h"
+#include "imports/iop_heaplib.h"
+#include "imports/iop_imports.h"
+#include "imports/iop_intrman.h"
+#include "imports/iop_ioman.h"
+#include "core/iop_kernel.h"
+#include "imports/iop_loadcore.h"
+#include "core/iop_memory.h"
+#include "services/iop_module_loader.h"
+#include "services/iop_rpc.h"
+#include "imports/iop_stdio.h"
+#include "imports/iop_sysclib.h"
+#include "imports/iop_sysmem.h"
+#include "imports/iop_timrman.h"
+#include "imports/iop_vblank.h"
+#include "iop_emulator_const.h"
+
+#include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+#include <unordered_map>
+#include <vector>
+#include <algorithm>
+#include <cctype>
+#include <map>
+#include <optional>
+#include <span>
+#include <sstream>
+#include <utility>
+
+namespace ps2x::iop::detail
+{
+    namespace
+    {
+        constexpr uint32_t kRamSize = IopMemory::RamSize;
+        constexpr uint32_t kKernelHeapBase = IopMemory::HeapBase;
+        constexpr uint32_t kKernelHeapLimit = IopMemory::HeapLimit;
+        constexpr uint32_t kCallStackBase = kKernelHeapLimit;
+        constexpr uint32_t kCallStackLimit = 0x001FFF00u;
+        constexpr uint32_t kCallStackSize = 0x2000u;
+        constexpr uint32_t kCallStackCapacity = (kCallStackLimit - kCallStackBase) / kCallStackSize;
+        constexpr uint64_t kCdvdCompletionCycles = 128u;
+
+        uint32_t physicalAddress(uint32_t address)
+        {
+            return IopMemory::physicalAddress(address);
+        }
+
+        int32_t sign16(uint32_t value)
+        {
+            return static_cast<int16_t>(value & 0xFFFFu);
+        }
+
+        bool iequals(std::string_view lhs, std::string_view rhs)
+        {
+            if (lhs.size() != rhs.size())
+                return false;
+            for (size_t i = 0; i < lhs.size(); ++i)
+            {
+                if (std::tolower(static_cast<unsigned char>(lhs[i])) !=
+                    std::tolower(static_cast<unsigned char>(rhs[i])))
+                    return false;
+            }
+            return true;
+        }
+
+    }
+
+    class IopEmulator::Impl final : public IopGuestExecutor
+    {
+    public:
+        using CpuState = IopCpuState;
+
+        struct Module
+        {
+            int id = 0;
+            std::string path;
+            std::string name;
+            uint32_t base = 0;
+            uint32_t size = 0;
+            uint32_t entry = 0;
+            uint32_t gp = 0;
+            bool resident = false;
+        };
+
+        struct GuestCallback
+        {
+            uint32_t function = 0;
+            uint32_t gp = 0;
+        };
+
+        struct ScheduledGuestCallback
+        {
+            uint32_t function = 0u;
+            uint32_t gp = 0u;
+            uint32_t argument = 0u;
+        };
+
+        explicit Impl(IopHost &hostRef)
+            : host(hostRef),
+              sysmem(host, memory),
+              kernel(memory),
+              cdvd(host, memory, kernel),
+              vblank(kernel),
+              rpc(host, memory, kernel),
+              sysclib(memory),
+              stdio(host, memory),
+              heaplib(memory),
+              intrman(memory),
+              timrman(),
+              ioman(memory),
+              cpuCore(memory),
+              imports(memory),
+              loadcore(memory, imports)
+        {
+            reset();
+        }
+
+        void reset()
+        {
+            memory.reset();
+            kernel.reset();
+            modules.clear();
+            imports.reset();
+            rpc.reset();
+            cdvd.reset();
+            intrman.reset();
+            timrman.reset();
+            ioman.reset();
+            pendingDmaInterrupts.clear();
+            nextDmaInterruptCycle = UINT64_MAX;
+            pendingGuestCallbacks.clear();
+            nextModuleId = 1;
+            moduleCursor = kModuleLoadBase;
+            totalCycles = 0;
+            memory.setCycleCounter(&totalCycles);
+            totalInstructions = 0;
+            eeCycleCarry = 0;
+            activeCpu = nullptr;
+            lastError.clear();
+            servicingDmaInterrupts = false;
+            servicingGuestCallbacks = false;
+            callDepth = 0u;
+            secrMcCommandHandler = {};
+            secrMcDevIdHandler = {};
+            checkKelfPathCallback = {};
+        }
+
+        uint8_t read8(uint32_t address) const
+        {
+            return memory.read8(address);
+        }
+
+        uint16_t read16(uint32_t address) const
+        {
+            return memory.read16(address);
+        }
+
+        uint32_t read32(uint32_t address) const
+        {
+            return memory.read32(address);
+        }
+
+        void write8(uint32_t address, uint8_t value)
+        {
+            memory.write8(address, value);
+            schedulePendingDma();
+        }
+
+        void write16(uint32_t address, uint16_t value)
+        {
+            memory.write16(address, value);
+            schedulePendingDma();
+        }
+
+        void write32(uint32_t address, uint32_t value)
+        {
+            memory.write32(address, value);
+            schedulePendingDma();
+        }
+
+        void schedulePendingDma()
+        {
+            // LOCAL PATCH: interrupts raised by PCSX2's SPU2 core (DMA 4/7 done, SPU2 IRQ) are due now.
+            if (memory.spu2().hasPendingIrqs())
+            {
+                for (const int irq : memory.spu2().takePendingIrqs())
+                    pendingDmaInterrupts[irq] = totalCycles;
+                updateNextDmaInterruptCycle();
+            }
+            if (!memory.hasDmaStart())
+                return;
+            if (const auto dma = memory.takeDmaStart())
+            {
+                pendingDmaInterrupts[dma->irq] = totalCycles + dma->delayCycles;
+                updateNextDmaInterruptCycle();
+            }
+        }
+
+        void updateNextDmaInterruptCycle()
+        {
+            nextDmaInterruptCycle = UINT64_MAX;
+            for (const auto &[irq, completionCycle] : pendingDmaInterrupts)
+                nextDmaInterruptCycle = std::min(nextDmaInterruptCycle, completionCycle);
+        }
+
+        bool readRam(uint32_t address, void *destination, size_t size) const
+        {
+            return memory.readRam(address, destination, size);
+        }
+
+        bool writeRam(uint32_t address, const void *source, size_t size)
+        {
+            return memory.writeRam(address, source, size);
+        }
+
+        bool zeroRam(uint32_t address, size_t size)
+        {
+            return memory.zeroRam(address, size);
+        }
+
+        bool isHardwareAddress(uint32_t phys) const
+        {
+            return memory.isHardwareAddress(phys);
+        }
+
+        uint32_t allocate(uint32_t size, uint32_t alignment = 16u, std::optional<uint32_t> fixed = std::nullopt)
+        {
+            return memory.allocate(size, alignment, fixed);
+        }
+
+        bool freeAllocation(uint32_t address)
+        {
+            return memory.freeAllocation(address);
+        }
+
+        void log(LogLevel level, std::string_view text)
+        {
+            host.log(level, text);
+        }
+
+        bool checkInterrupt(CpuState &cpu)
+        {
+            const uint32_t status = cpu.cop0[12];
+            if ((status & 1u) == 0u)
+                return false;
+            if ((status & 0x2u) != 0u)
+                return false;
+            const bool pending = memory.interruptControl() != 0u && (memory.interruptStatus() & memory.interruptMask()) != 0u;
+            if (!pending)
+                return false;
+            cpu.cop0[13] |= 0x400u;
+            cpuCore.raiseException(cpu, 0u, cpu.pc, false);
+            return true;
+        }
+
+        enum class ImportDisposition
+        {
+            Handled,
+            JumpToGuest,
+            Missing,
+        };
+
+        ImportDisposition dispatchImport(const IopImportCall &call, CpuState &cpu)
+        {
+            const uint32_t a0 = cpu.gpr[4];
+            auto setV0 = [&](uint32_t value)
+            {
+                cpu.gpr[2] = value;
+            };
+
+            if (iequals(call.library, "sysmem") && sysmem.dispatchImport(call.ordinal, cpu))
+                return ImportDisposition::Handled;
+
+            if (iequals(call.library, "cdvdman") && cdvd.dispatchImport(call.ordinal, cpu))
+            {
+                if (const auto callback = cdvd.takeCompletionCallback())
+                {
+                    pendingGuestCallbacks.emplace(
+                        totalCycles + kCdvdCompletionCycles,
+                        ScheduledGuestCallback{
+                            callback->address,
+                            callback->gp,
+                            callback->reason,
+                        });
+                }
+                return ImportDisposition::Handled;
+            }
+
+            if (iequals(call.library, "loadcore") && loadcore.dispatchImport(call.ordinal, cpu))
+                return ImportDisposition::Handled;
+
+            if (iequals(call.library, "thbase") || iequals(call.library, "threadman"))
+            {
+                return kernel.dispatchThreadImport(call.ordinal, cpu, totalCycles)
+                           ? ImportDisposition::Handled
+                           : ImportDisposition::Missing;
+            }
+            if (iequals(call.library, "thsemap"))
+            {
+                return kernel.dispatchSemaphoreImport(call.ordinal, cpu)
+                           ? ImportDisposition::Handled
+                           : ImportDisposition::Missing;
+            }
+            if (iequals(call.library, "thevent"))
+            {
+                return kernel.dispatchEventImport(call.ordinal, cpu)
+                           ? ImportDisposition::Handled
+                           : ImportDisposition::Missing;
+            }
+            if (iequals(call.library, "thmsgbx"))
+            {
+                return kernel.dispatchMailboxImport(call.ordinal, cpu)
+                           ? ImportDisposition::Handled
+                           : ImportDisposition::Missing;
+            }
+            if (iequals(call.library, "sifcmd"))
+            {
+                return rpc.dispatchSifCmdImport(call.ordinal, cpu)
+                           ? ImportDisposition::Handled
+                           : ImportDisposition::Missing;
+            }
+            if (iequals(call.library, "intrman") && intrman.dispatchImport(call.ordinal, cpu, *this))
+                return ImportDisposition::Handled;
+            if (iequals(call.library, "secrman"))
+            {
+                switch (call.ordinal)
+                {
+                case 4: // SecrSetMcCommandHandler
+                    secrMcCommandHandler = {a0, cpu.gpr[28]};
+                    setV0(0);
+                    return ImportDisposition::Handled;
+                case 5: // SecrSetMcDevIDHandler
+                    secrMcDevIdHandler = {a0, cpu.gpr[28]};
+                    setV0(0);
+                    return ImportDisposition::Handled;
+                default:
+                    break;
+                }
+            }
+            if (iequals(call.library, "modload") && call.ordinal == 13u)
+            {
+                checkKelfPathCallback = {a0, cpu.gpr[28]};
+                setV0(0);
+                return ImportDisposition::Handled;
+            }
+            if (iequals(call.library, "ioman") && ioman.dispatchImport(call.ordinal, cpu, *this))
+                return ImportDisposition::Handled;
+            if (iequals(call.library, "sifman"))
+            {
+                return rpc.dispatchSifManImport(call.ordinal, cpu)
+                           ? ImportDisposition::Handled
+                           : ImportDisposition::Missing;
+            }
+            if (iequals(call.library, "vblank") && vblank.dispatchImport(call.ordinal, cpu, totalCycles))
+                return ImportDisposition::Handled;
+            if (iequals(call.library, "timrman") && timrman.dispatchImport(call.ordinal, cpu, totalCycles))
+                return ImportDisposition::Handled;
+            if (iequals(call.library, "dmacman"))
+            {
+                setV0(0);
+                return ImportDisposition::Handled;
+            }
+            if (iequals(call.library, "stdio") && stdio.dispatchImport(call.ordinal, cpu))
+                return ImportDisposition::Handled;
+            if (iequals(call.library, "sysclib"))
+            {
+                return sysclib.dispatchImport(call.ordinal, cpu)
+                           ? ImportDisposition::Handled
+                           : ImportDisposition::Missing;
+            }
+            if (iequals(call.library, "heaplib") && heaplib.dispatchImport(call.ordinal, cpu))
+                return ImportDisposition::Handled;
+
+            const uint32_t target = imports.resolve(call.library, call.ordinal, call.version);
+            if (target != 0u)
+            {
+                cpu.pc = target;
+                cpu.branchPending = false;
+                return ImportDisposition::JumpToGuest;
+            }
+
+            std::ostringstream out;
+            out << "[IOP] unhandled import " << call.library << ':' << call.ordinal
+                << " version=0x" << std::hex << call.version << " pc=0x" << cpu.pc;
+            log(LogLevel::Warning, out.str());
+            setV0(0);
+            return ImportDisposition::Missing;
+        }
+
+        // Native versions of hot routines in IOP libraries (HLE). A routine is replaced only when
+        // a module's code matches it word for word (jump targets aside: the loader relocates
+        // them). Its first word then becomes an opcode-31 marker, which the R3000 does not
+        // decode; step() runs the native version, counts the cycles the original takes so the
+        // IOP's clock stays where it was, and returns to the caller.
+        struct NativeRoutine
+        {
+            const char *module;         // file name prefix, e.g. "CRI_ADXI"
+            uint32_t offset;            // from the module's base
+            std::vector<uint32_t> code; // the routine as linked
+            uint32_t cycles;            // what the original takes
+            void (*run)(Impl &, CpuState &);
+        };
+        static constexpr uint32_t kNativeMarker = 0x7C000000u;
+
+        // CRI ADX sound driver (CRI_ADXI.IRX): the mixer's last step turns 256 accumulated
+        // 32-bit samples at a0 into 16-bit ones in place, saturating to +-32767.
+        static void adxMixClampToS16(Impl &impl, CpuState &cpu)
+        {
+            uint32_t source = cpu.gpr[4];
+            uint32_t destination = source;
+            for (uint32_t i = 0; i < 256u; ++i, source += 4u, destination += 2u)
+            {
+                const int32_t value = static_cast<int32_t>(impl.memory.read32(source));
+                const int32_t clamped = value > 32767 ? 32767 : value < -32767 ? -32767 : value;
+                impl.memory.write16(destination, static_cast<uint16_t>(clamped));
+            }
+            cpu.gpr[2] = 0u;
+        }
+
+        static const std::vector<NativeRoutine> &nativeRoutines()
+        {
+            static const std::vector<NativeRoutine> s_routines = {
+                {"CRI_ADXI", 0x36F4u,
+                 {0x00801821u, 0x00003021u, 0x24077FFFu, 0x24088001u, 0x8C850000u, 0x00000000u, 0x00E5102Au,
+                  0x14400008u, 0x28A28001u, 0x14400008u, 0x00000000u, 0x94820000u, 0x24840004u, 0xA4620000u,
+                  0x08000DD2u, 0x24630002u, 0x08000DD0u, 0xA4670000u, 0xA4680000u, 0x24630002u, 0x24840004u,
+                  0x24C60001u, 0x2CC20100u, 0x1440FFECu, 0x00000000u, 0x03E00008u, 0x00000000u},
+                 256u * 15u + 6u, &Impl::adxMixClampToS16},
+            };
+            return s_routines;
+        }
+
+        // PS2X_IOP_NATIVE=0 keeps every routine interpreted.
+        void installNativeRoutines(const Module &module)
+        {
+            static const bool s_enabled = []()
+            {
+                const char *value = std::getenv("PS2X_IOP_NATIVE");
+                return !(value && value[0] == '0');
+            }();
+            if (!s_enabled)
+                return;
+            const std::vector<NativeRoutine> &routines = nativeRoutines();
+            for (size_t id = 0; id < routines.size(); ++id)
+            {
+                const NativeRoutine &routine = routines[id];
+                if (module.name.rfind(routine.module, 0) != 0 ||
+                    routine.offset + routine.code.size() * 4u > module.size)
+                    continue;
+                const uint32_t address = module.base + routine.offset;
+                bool matches = true;
+                for (size_t i = 0; i < routine.code.size() && matches; ++i)
+                {
+                    const uint32_t expected = routine.code[i];
+                    const uint32_t actual = memory.read32(address + static_cast<uint32_t>(i) * 4u);
+                    const bool jump = (expected >> 26) == 2u || (expected >> 26) == 3u;
+                    matches = jump ? (actual >> 26) == (expected >> 26) : actual == expected;
+                }
+                if (!matches)
+                    continue;
+                memory.write32(address, kNativeMarker | static_cast<uint32_t>(id));
+                std::ostringstream out;
+                out << "[IOP] native " << routine.module << "+0x" << std::hex << routine.offset;
+                log(LogLevel::Info, out.str());
+            }
+        }
+
+        PS2X_IOP_INLINE bool step(CpuState &cpu)
+        {
+            if (cpu.stopped)
+                return false;
+            if (cpu.pc == kThreadReturnSentinel || cpu.pc == kCallReturnSentinel)
+            {
+                cpu.stopped = true;
+                return false;
+            }
+            if (physicalAddress(cpu.pc) >= kRamSize)
+            {
+                std::ostringstream out;
+                out << "[IOP] execution outside RAM pc=0x" << std::hex << cpu.pc;
+                log(LogLevel::Error, out.str());
+                cpu.stopped = true;
+                return false;
+            }
+            if (checkInterrupt(cpu))
+                return true;
+
+            const uint32_t word = memory.read32(cpu.pc);
+            if ((word & 0xFC000000u) == kNativeMarker)
+            {
+                const uint32_t id = word & 0xFFFFu;
+                if (id < nativeRoutines().size())
+                {
+                    const NativeRoutine &routine = nativeRoutines()[id];
+                    routine.run(*this, cpu);
+                    totalInstructions += routine.cycles;
+                    totalCycles += routine.cycles;
+                    cpu.pc = cpu.gpr[31];
+                    cpu.branchPending = false;
+                    return !cpu.stopped;
+                }
+            }
+
+            // Import stubs start with jr ra (decode checks it too); skip the call otherwise.
+            if (const auto import = word == 0x03E00008u ? imports.decode(cpu.pc) : std::optional<IopImportCall>{})
+            {
+                const ImportDisposition disposition = dispatchImport(*import, cpu);
+                ++totalInstructions;
+                ++totalCycles;
+                if (disposition == ImportDisposition::JumpToGuest)
+                    return true;
+                cpu.pc = cpu.gpr[31];
+                cpu.branchPending = false;
+                return !cpu.stopped;
+            }
+
+            const bool running = cpuCore.executeInstructionInline(cpu);
+            if (memory.hasDmaStart() || memory.spu2().hasPendingIrqs())
+                schedulePendingDma();
+            ++totalInstructions;
+            ++totalCycles;
+            return running;
+        }
+
+        // Diagnostics: PS2X_IOP_PC_STATS samples the IOP program counter every 1024
+        // instructions and, about every five seconds, prints the busiest addresses with
+        // the module holding them and the instruction rate.
+        static bool pcStatsEnabled()
+        {
+            static const bool s_enabled = std::getenv("PS2X_IOP_PC_STATS") != nullptr;
+            return s_enabled;
+        }
+
+        void samplePc(uint32_t pc)
+        {
+            static std::unordered_map<uint32_t, uint64_t> s_samples;
+            static auto s_last = std::chrono::steady_clock::now();
+            static uint64_t s_lastInstructions = 0;
+            ++s_samples[pc];
+            const auto now = std::chrono::steady_clock::now();
+            const double seconds = std::chrono::duration<double>(now - s_last).count();
+            if (seconds < 5.0)
+                return;
+            std::vector<std::pair<uint64_t, uint32_t>> ranked;
+            uint64_t total = 0;
+            for (const auto &[address, count] : s_samples)
+            {
+                ranked.push_back({count, address});
+                total += count;
+            }
+            std::sort(ranked.rbegin(), ranked.rend());
+            std::fprintf(stderr, "[iop-pc] %.1f M instructions/s, %llu samples\n",
+                         static_cast<double>(totalInstructions - s_lastInstructions) / seconds / 1.0e6,
+                         static_cast<unsigned long long>(total));
+            for (size_t i = 0; i < ranked.size() && i < 16u; ++i)
+            {
+                const uint32_t address = ranked[i].second;
+                const char *name = "?";
+                uint32_t offset = address;
+                for (const auto &[id, module] : modules)
+                {
+                    const uint32_t phys = address & 0x1FFFFFFFu;
+                    if (phys >= module.base && phys < module.base + module.size)
+                    {
+                        name = module.name.c_str();
+                        offset = phys - module.base;
+                        break;
+                    }
+                }
+                std::fprintf(stderr, "[iop-pc]   %5.1f%%  %08x  %s+%x\n",
+                             100.0 * static_cast<double>(ranked[i].first) / static_cast<double>(total), address, name,
+                             offset);
+            }
+            s_samples.clear();
+            s_last = now;
+            s_lastInstructions = totalInstructions;
+        }
+
+        uint32_t runCpu(CpuState &cpu, uint32_t instructionBudget)
+        {
+            CpuState *previous = activeCpu;
+            activeCpu = &cpu;
+            const uint64_t start = totalInstructions;
+            const bool samplePcs = pcStatsEnabled();
+            while (!cpu.stopped && !cpu.yielded && totalInstructions - start < instructionBudget)
+            {
+                if (samplePcs && (totalInstructions & 1023u) == 0u)
+                    samplePc(cpu.pc);
+                if (!step(cpu))
+                    break;
+                if (!servicingDmaInterrupts && !pendingDmaInterrupts.empty())
+                {
+                    // Not due yet: only the critical-section bookkeeping that
+                    // servicePendingDmaInterrupts() would do before returning.
+                    if (totalCycles >= nextDmaInterruptCycle)
+                        servicePendingDmaInterrupts();
+                    else
+                        (void)inCriticalSection();
+                }
+                if (!servicingGuestCallbacks && !pendingGuestCallbacks.empty())
+                    servicePendingGuestCallbacks();
+            }
+            activeCpu = previous;
+            return static_cast<uint32_t>(totalInstructions - start);
+        }
+
+        uint32_t callFunction(uint32_t address,
+                              uint32_t a0,
+                              uint32_t a1,
+                              uint32_t a2,
+                              uint32_t a3,
+                              uint32_t gp,
+                              uint32_t budget = kMaxCallInstructions)
+        {
+            struct CallDepthGuard
+            {
+                uint32_t &depth;
+                ~CallDepthGuard() { --depth; }
+            };
+
+            const uint32_t depth = callDepth++;
+            const CallDepthGuard depthGuard{callDepth};
+            CpuState cpu{};
+            cpu.pc = address;
+            cpu.gpr[4] = a0;
+            cpu.gpr[5] = a1;
+            cpu.gpr[6] = a2;
+            cpu.gpr[7] = a3;
+            cpu.gpr[28] = gp;
+            if (depth < kCallStackCapacity)
+            {
+                const uint32_t stackTop = kCallStackLimit - depth * kCallStackSize;
+                cpu.gpr[29] = stackTop - 32u;
+            }
+            else if (activeCpu && activeCpu->gpr[29] > kCallStackBase + kStackGuardBytes)
+            {
+                // Extremely deep re-entrancy borrows unused space below the
+                // suspended caller's live frame. Stack growth remains away
+                // from the caller, so its saved registers stay intact.
+                cpu.gpr[29] = (activeCpu->gpr[29] - kStackGuardBytes) & ~15u;
+            }
+            else
+            {
+                cpu.gpr[29] = kCallStackBase - 32u;
+            }
+            cpu.gpr[31] = kCallReturnSentinel;
+            runCpu(cpu, budget);
+            return cpu.gpr[2];
+        }
+
+        uint32_t executeGuestFunction(uint32_t address,
+                                      uint32_t a0,
+                                      uint32_t a1,
+                                      uint32_t a2,
+                                      uint32_t a3,
+                                      uint32_t gp) override
+        {
+            return callFunction(address, a0, a1, a2, a3, gp);
+        }
+
+        uint32_t executeGuestFunctionWithBudget(uint32_t address,
+                                                uint32_t a0,
+                                                uint32_t a1,
+                                                uint32_t a2,
+                                                uint32_t a3,
+                                                uint32_t gp,
+                                                uint32_t instructionBudget) override
+        {
+            return callFunction(address, a0, a1, a2, a3, gp, instructionBudget);
+        }
+
+        // A thread that suspends interrupts (CpuSuspendIntr) is neither
+        // preempted nor interrupted on hardware until it resumes them; IOP
+        // modules rely on that to update shared state atomically. A module that
+        // leaves interrupts off for too long is ignored so the rest of the IOP
+        // keeps running.
+        static constexpr uint64_t kMaxCriticalSectionCycles = 1'000'000u;
+        uint64_t criticalSectionStart = 0u;
+        bool criticalSectionOpen = false;
+        bool inCriticalSection()
+        {
+            if (memory.interruptControl() != 0u)
+            {
+                criticalSectionOpen = false;
+                return false;
+            }
+            if (!criticalSectionOpen)
+            {
+                criticalSectionOpen = true;
+                criticalSectionStart = totalCycles;
+            }
+            return totalCycles - criticalSectionStart < kMaxCriticalSectionCycles;
+        }
+
+        // Not that good to use exception handling for control flow but will do for now
+        void servicePendingDmaInterrupts()
+        {
+            if (servicingDmaInterrupts || pendingDmaInterrupts.empty() || inCriticalSection())
+                return;
+            if (totalCycles < nextDmaInterruptCycle)
+                return;
+
+            servicingDmaInterrupts = true;
+
+            std::vector<int> completed;
+            for (auto it = pendingDmaInterrupts.begin(); it != pendingDmaInterrupts.end();)
+            {
+                if (it->second > totalCycles)
+                {
+                    ++it;
+                    continue;
+                }
+                completed.push_back(it->first);
+                it = pendingDmaInterrupts.erase(it);
+            }
+            updateNextDmaInterruptCycle();
+            try
+            {
+                for (const int irq : completed)
+                    (void)intrman.dispatchInterrupt(irq, *this);
+            }
+            catch (...)
+            {
+                servicingDmaInterrupts = false;
+                throw;
+            }
+            servicingDmaInterrupts = false;
+        }
+
+        void servicePendingGuestCallbacks()
+        {
+            if (servicingGuestCallbacks || pendingGuestCallbacks.empty() || inCriticalSection())
+                return;
+
+            std::vector<ScheduledGuestCallback> callbacks;
+            for (auto it = pendingGuestCallbacks.begin(); it != pendingGuestCallbacks.end();)
+            {
+                if (it->first > totalCycles)
+                    break;
+                callbacks.push_back(it->second);
+                it = pendingGuestCallbacks.erase(it);
+            }
+            if (callbacks.empty())
+                return;
+
+            servicingGuestCallbacks = true;
+            try
+            {
+                for (const ScheduledGuestCallback &callback : callbacks)
+                {
+                    if (callback.function != 0u)
+                    {
+                        (void)callFunction(callback.function,
+                                           callback.argument,
+                                           0u,
+                                           0u,
+                                           0u,
+                                           callback.gp,
+                                           100000u);
+                    }
+                }
+            }
+            catch (...)
+            {
+                servicingGuestCallbacks = false;
+                throw;
+            }
+            servicingGuestCallbacks = false;
+        }
+
+        void runCycles(uint64_t cycles) noexcept
+        {
+            try
+            {
+                const uint64_t target = totalCycles + cycles;
+                while (totalCycles < target)
+                {
+                    // LOCAL PATCH: PCSX2's SPU2 core asks to be woken at a cycle (its IOP counter 6): a DMA completion or
+                    // its regular tick. Its interrupts then go out like the other DMA interrupts.
+                    memory.spu2().serviceEvents(totalCycles);
+                    if (memory.spu2().hasPendingIrqs())
+                        schedulePendingDma();
+                    servicePendingDmaInterrupts();
+                    servicePendingGuestCallbacks();
+                    if (!inCriticalSection())
+                        timrman.serviceDue(totalCycles, *this);
+                    IopThread *next = kernel.beginNextReady(totalCycles);
+                    if (!next)
+                    {
+                        uint64_t nextWake = kernel.nextWakeCycle(target);
+                        for (const auto &[irq, completionCycle] : pendingDmaInterrupts)
+                            nextWake = std::min(nextWake, completionCycle);
+                        if (!pendingGuestCallbacks.empty())
+                            nextWake = std::min(nextWake, pendingGuestCallbacks.begin()->first);
+                        nextWake = timrman.nextEventCycle(nextWake);
+                        nextWake = std::min(nextWake, memory.spu2().nextEventCycle(totalCycles));
+                        totalCycles = std::max(totalCycles + 1u, std::min(target, nextWake));
+                        continue;
+                    }
+                    const uint64_t before = totalCycles;
+                    const uint64_t spuEvent = memory.spu2().nextEventCycle(totalCycles);
+                    const uint64_t sliceEnd = std::min(target, std::max(spuEvent, totalCycles + 1u));
+                    runCpu(next->cpu, static_cast<uint32_t>(std::min<uint64_t>(kDefaultSlice, sliceEnd - totalCycles)));
+                    // The slice may not end inside a critical section.
+                    while (inCriticalSection() && !next->cpu.stopped && !next->cpu.yielded &&
+                           next->state == IopThreadState::Running)
+                        runCpu(next->cpu, kDefaultSlice);
+                    kernel.endTimeslice(*next, kThreadReturnSentinel);
+                    if (totalCycles == before)
+                        ++totalCycles;
+                }
+                memory.spu2().advanceTo(totalCycles);
+            }
+            catch (...)
+            {
+                // Runtime scheduling must never throw through EeScheduler::accountCycles().
+            }
+        }
+
+        ModuleLoadResult loadImage(std::string path, std::span<const uint8_t> image, const void *arguments, uint32_t argumentSize)
+        {
+            ModuleLoadResult result{true, -1, -1};
+            const IopImageLoadResult loaded = IopModuleLoader::load(image, memory, moduleCursor);
+            moduleCursor = loaded.nextModuleCursor;
+            if (!loaded)
+            {
+                if (loaded.error == IopImageLoadError::InvalidElf)
+                    log(LogLevel::Error, "[IOP] rejected invalid/non-MIPS IRX ELF");
+                else if (loaded.error == IopImageLoadError::ArenaExhausted)
+                    log(LogLevel::Error, "[IOP] module arena exhausted");
+                return result;
+            }
+            if (!loaded.relocationsComplete)
+                log(LogLevel::Warning, "[IOP] one or more IRX relocations were unsupported");
+
+            Module module;
+            module.id = nextModuleId++;
+            module.path = std::move(path);
+            const size_t slash = module.path.find_last_of("/\\:");
+            module.name = slash == std::string::npos ? module.path : module.path.substr(slash + 1u);
+            module.base = loaded.base;
+            module.size = loaded.size;
+            module.entry = loaded.entry;
+            module.gp = loaded.gp;
+            installNativeRoutines(module);
+
+            // IRX entry: start(int argc, char *argv[]). Like loadcore, argv[0] is
+            // the module path and the NUL-separated load arguments follow.
+            std::vector<std::string> argvStrings{module.path};
+            if (arguments && argumentSize)
+            {
+                const auto *bytes = static_cast<const char *>(arguments);
+                uint32_t begin = 0u;
+                for (uint32_t i = 0; i < argumentSize; ++i)
+                {
+                    if (bytes[i] == 0)
+                    {
+                        argvStrings.emplace_back(bytes + begin, i - begin);
+                        begin = i + 1u;
+                    }
+                }
+                if (begin < argumentSize)
+                    argvStrings.emplace_back(bytes + begin, argumentSize - begin);
+            }
+            uint32_t stringBytes = 0u;
+            for (const std::string &text : argvStrings)
+                stringBytes += static_cast<uint32_t>(text.size()) + 1u;
+            const uint32_t pointerBytes = static_cast<uint32_t>((argvStrings.size() + 1u) * 4u);
+            const uint32_t argvBlock = allocate(pointerBytes + stringBytes, 16u);
+            uint32_t argv = 0u;
+            if (argvBlock)
+            {
+                argv = argvBlock;
+                uint32_t cursor = argvBlock + pointerBytes;
+                for (size_t i = 0; i < argvStrings.size(); ++i)
+                {
+                    const std::string &text = argvStrings[i];
+                    const uint32_t pointer = cursor;
+                    writeRam(argv + static_cast<uint32_t>(i) * 4u, &pointer, 4u);
+                    writeRam(cursor, text.data(), text.size());
+                    write8(cursor + static_cast<uint32_t>(text.size()), 0u);
+                    cursor += static_cast<uint32_t>(text.size()) + 1u;
+                }
+                const uint32_t terminator = 0u;
+                writeRam(argv + static_cast<uint32_t>(argvStrings.size()) * 4u, &terminator, 4u);
+            }
+            const uint32_t argc = argvBlock ? static_cast<uint32_t>(argvStrings.size()) : 0u;
+            const uint32_t startResult = callFunction(module.entry, argc, argv, 0u, 0u, module.gp);
+            if (argvBlock)
+                freeAllocation(argvBlock);
+            module.resident = startResult == 0u || startResult == 2u;
+            result.moduleId = module.id;
+            result.startResult = static_cast<int32_t>(startResult);
+            modules[module.id] = std::move(module);
+
+            std::ostringstream out;
+            out << "[IOP] loaded IRX id=" << result.moduleId
+                << " entry=0x" << std::hex << modules[result.moduleId].entry
+                << " base=0x" << modules[result.moduleId].base
+                << " start=" << std::dec << result.startResult;
+            log(LogLevel::Info, out.str());
+            return result;
+        }
+
+        ModuleLoadResult loadModule(std::string_view path, const void *arguments, uint32_t argumentSize)
+        {
+            std::vector<uint8_t> image;
+            if (!IopModuleLoader::readWholeHostFile(host, path, image))
+            {
+                log(LogLevel::Warning, std::string("[IOP] failed to open IRX '") + std::string(path) + "'");
+                return {true, -1, -1};
+            }
+            return loadImage(std::string(path), image, arguments, argumentSize);
+        }
+
+        ModuleLoadResult loadModuleBuffer(uint32_t guestAddress, const void *arguments, uint32_t argumentSize)
+        {
+            std::vector<uint8_t> image;
+            if (!IopModuleLoader::readElfFromGuest(host, guestAddress, image))
+                return {true, -1, -1};
+            std::ostringstream tag;
+            tag << "buffer@0x" << std::hex << guestAddress;
+            return loadImage(tag.str(), image, arguments, argumentSize);
+        }
+
+        bool stopModule(int32_t moduleId, int32_t *result)
+        {
+            auto it = modules.find(moduleId);
+            if (it == modules.end())
+                return false;
+            // A removable IRX normally exposes a stop entry through module metadata. We do not guess it; terminate owned execution and release the image cleanly.
+            kernel.terminateThreadsInRange(it->second.base, it->second.size);
+            rpc.removeServersInRange(it->second.base, it->second.size);
+            imports.eraseRange(it->second.base, it->second.size);
+            modules.erase(it);
+            kernel.cleanupDeadThreads();
+            if (result)
+                *result = 0;
+            return true;
+        }
+
+        IopHost &host;
+        IopMemory memory;
+        IopSysmem sysmem;
+        IopKernel kernel;
+        IopCdvd cdvd;
+        IopVblank vblank;
+        IopRpcBridge rpc;
+        IopSysclib sysclib;
+        IopStdio stdio;
+        IopHeaplib heaplib;
+        IopIntrman intrman;
+        IopTimrman timrman;
+        IopIoman ioman;
+        IopCpuCore cpuCore;
+        IopImportRegistry imports;
+        IopLoadcore loadcore;
+        std::map<int, Module> modules;
+        std::map<int, uint64_t> pendingDmaInterrupts;
+        // Earliest completion cycle in pendingDmaInterrupts (UINT64_MAX when empty).
+        uint64_t nextDmaInterruptCycle = UINT64_MAX;
+        std::multimap<uint64_t, ScheduledGuestCallback> pendingGuestCallbacks;
+        uint32_t nextModuleId = 1;
+        uint32_t moduleCursor = kModuleLoadBase;
+        uint64_t totalCycles = 0;
+        uint64_t totalInstructions = 0;
+        uint64_t eeCycleCarry = 0;
+
+        // Run EE cycles that runEeCycles() batched, so anything that observes or
+        // talks to the IOP sees it at the EE's current time.
+        void flushPendingEeCycles() noexcept
+        {
+            const uint64_t iopCycles = eeCycleCarry / 8u;
+            eeCycleCarry %= 8u;
+            if (iopCycles)
+                runCycles(iopCycles);
+        }
+        CpuState *activeCpu = nullptr;
+        std::string lastError;
+        bool servicingDmaInterrupts = false;
+        bool servicingGuestCallbacks = false;
+        uint32_t callDepth = 0u;
+        GuestCallback secrMcCommandHandler;
+        GuestCallback secrMcDevIdHandler;
+        GuestCallback checkKelfPathCallback;
+    };
+
+    IopEmulator::IopEmulator(IopHost &host)
+        : m_impl(std::make_unique<Impl>(host))
+    {
+    }
+
+    IopEmulator::~IopEmulator() = default;
+
+    void IopEmulator::reset()
+    {
+        m_impl->reset();
+    }
+
+    ModuleLoadResult IopEmulator::loadModule(std::string_view path, const void *arguments, uint32_t argumentSize)
+    {
+        m_impl->flushPendingEeCycles();
+        return m_impl->loadModule(path, arguments, argumentSize);
+    }
+
+    ModuleLoadResult IopEmulator::loadModuleBuffer(uint32_t guestAddress, const void *arguments, uint32_t argumentSize)
+    {
+        m_impl->flushPendingEeCycles();
+        return m_impl->loadModuleBuffer(guestAddress, arguments, argumentSize);
+    }
+
+    bool IopEmulator::stopModule(int32_t moduleId, int32_t *result)
+    {
+        m_impl->flushPendingEeCycles();
+        return m_impl->stopModule(moduleId, result);
+    }
+
+    void IopEmulator::runEeCycles(uint64_t eeCycles) noexcept
+    {
+        // The EE scheduler reports progress every few dozen cycles (each guest
+        // loop checkpoint). Running the IOP scheduler for a handful of cycles per
+        // call costs far more than the emulated work, so batch small advances.
+        constexpr uint64_t kMinIopBatchCycles = 128u;
+        const uint64_t total = m_impl->eeCycleCarry + eeCycles;
+        if (total / 8u < kMinIopBatchCycles)
+        {
+            m_impl->eeCycleCarry = total;
+            return;
+        }
+        const uint64_t iopCycles = total / 8u;
+        m_impl->eeCycleCarry = total % 8u;
+        if (iopCycles)
+            m_impl->runCycles(iopCycles);
+    }
+
+    RpcResult IopEmulator::handleRpc(const RpcRequest &request)
+    {
+        m_impl->flushPendingEeCycles();
+        return m_impl->rpc.handleRpc(request, *m_impl);
+    }
+
+    bool IopEmulator::hasRpcServer(uint32_t sid) const noexcept
+    {
+        return m_impl->rpc.hasServer(sid);
+    }
+
+    void IopEmulator::onSifTransfer(const SifTransfer &transfer)
+    {
+        m_impl->flushPendingEeCycles();
+        m_impl->rpc.onSifTransfer(transfer);
+    }
+
+    uint32_t IopEmulator::allocateMemory(uint32_t size, uint32_t alignment)
+    {
+        return m_impl->memory.allocate(size, alignment);
+    }
+
+    bool IopEmulator::freeMemory(uint32_t address)
+    {
+        return m_impl->memory.freeAllocation(address);
+    }
+
+    bool IopEmulator::readMemory(uint32_t address, void *destination, size_t size) const
+    {
+        return isMemoryRange(address, size) &&
+               m_impl->memory.readRam(address, destination, size);
+    }
+
+    bool IopEmulator::writeMemory(uint32_t address, const void *source, size_t size)
+    {
+        return isMemoryRange(address, size) &&
+               m_impl->memory.writeRam(address, source, size);
+    }
+
+    bool IopEmulator::zeroMemory(uint32_t address, size_t size)
+    {
+        return isMemoryRange(address, size) &&
+               m_impl->memory.zeroRam(address, size);
+    }
+
+    bool IopEmulator::isMemoryRange(uint32_t address, size_t size) const
+    {
+        const bool physicalSegment = address < IopMemory::RamSize;
+        const bool cachedSegment = address >= 0x80000000u && address < 0x80200000u;
+        const bool uncachedSegment = address >= 0xA0000000u && address < 0xA0200000u;
+        if (!physicalSegment && !cachedSegment && !uncachedSegment)
+            return false;
+        const uint32_t physical = IopMemory::physicalAddress(address);
+        return physical <= IopMemory::RamSize && size <= IopMemory::RamSize - physical;
+    }
+
+    size_t IopEmulator::readAudio(int16_t *destination, size_t frames)
+    {
+        return m_impl->memory.spu2().readOutput(destination, frames);
+    }
+
+    uint64_t IopEmulator::cycles() const noexcept
+    {
+        // Include batched cycles; they run before the next IOP interaction.
+        return m_impl->totalCycles + m_impl->eeCycleCarry / 8u;
+    }
+
+    uint64_t IopEmulator::instructions() const noexcept
+    {
+        return m_impl->totalInstructions;
+    }
+
+    uint32_t IopEmulator::loadedModuleCount() const noexcept
+    {
+        return static_cast<uint32_t>(m_impl->modules.size());
+    }
+
+    uint32_t IopEmulator::threadCount() const noexcept
+    {
+        return static_cast<uint32_t>(m_impl->kernel.threadCount());
+    }
+
+    uint32_t IopEmulator::rpcServerCount() const noexcept
+    {
+        return static_cast<uint32_t>(m_impl->rpc.serverCount());
+    }
+
+}

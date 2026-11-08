@@ -1,0 +1,1428 @@
+#ifndef PS2_VU1_COMPILED_H
+#define PS2_VU1_COMPILED_H
+
+// Runtime support for VU1 micro programs translated ahead of time to C++ by
+// ps2xRuntime/tools/vu1rec.py.
+//
+// Translated programs must produce exactly what VU1Interpreter produces: the same
+// arithmetic, the same stall timing, the same flag/Q latencies and the same
+// interleaving of XGKICK transfers with stores. The model differs from the
+// interpreter in one way that does not change results: VF/VI/ACC writes land in
+// the register file immediately and only their ready cycles are tracked. The VU
+// interlocks on those registers, so no instruction can observe the old value
+// once the write has issued. MAC/status/clip flags and Q are not interlocked,
+// so they keep explicit pending queues that commit exactly when the interpreter
+// commits them.
+
+#include <algorithm>
+#include <cmath>
+#include <atomic>
+#include <cstdint>
+#include <cstring>
+#include <limits>
+
+#include "runtime/ps2_vu1_efu.h"
+
+#if defined(USE_SSE2NEON)
+#include "sse2neon.h"
+#else
+#include <immintrin.h>
+#endif
+
+// Hot helpers are forced inline into the (very large) translated run functions,
+// where the inliner would otherwise give up; their rare slow paths stay out of line.
+#if defined(_MSC_VER) && !defined(__clang__)
+#define PS2X_VU1C_INLINE __forceinline
+#define PS2X_VU1C_NOINLINE __declspec(noinline)
+#else
+#define PS2X_VU1C_INLINE inline __attribute__((always_inline))
+#define PS2X_VU1C_NOINLINE __attribute__((noinline))
+#endif
+
+namespace ps2x::vu1c
+{
+    // LOCAL PATCH: PS2X_VU1_FAST=1 ("Fast VU"): an FMAC lane outside the normal range no longer takes the exact long-double
+    // path; the SSE result is clamped to the finite range and the flags come from its zero and sign bits, like PCSX2's
+    // default VU settings. Off by default (results and flags can differ from the exact model, the replay benchmark's
+    // checksum then differs too).
+    inline const bool g_vu1FastMode = []
+    {
+        const char *e = std::getenv("PS2X_VU1_FAST");
+        return e && e[0] != '\0' && e[0] != '0';
+    }();
+    inline std::atomic<uint64_t> g_exactCalls{0};
+    inline std::atomic<uint64_t> g_exactReason[4]{}; // 0 zero result from nonzero operands, 1 out of range, 2 cancellation/other
+    inline std::atomic<uint64_t> g_exactByKind[8]{}; // by FmacKind (0 ADD 1 SUB 2 MUL 3 MADD 4 MSUB 5 OPMSUB 6 OPMULA)
+    inline void printExactStats()
+    {
+        std::fprintf(stderr, "[vu1-exact] exact-path FMAC calls: %llu  (zero result from nonzero operands %llu, out of range %llu, other %llu)\n",
+                     static_cast<unsigned long long>(g_exactCalls.load()), static_cast<unsigned long long>(g_exactReason[0].load()),
+                     static_cast<unsigned long long>(g_exactReason[1].load()), static_cast<unsigned long long>(g_exactReason[2].load()));
+    }
+    PS2X_VU1C_INLINE __m128 fastClamp(__m128 value)
+    {
+        const __m128 limit = _mm_set1_ps(3.4028234663852886e38f);
+        return _mm_max_ps(_mm_min_ps(value, limit), _mm_sub_ps(_mm_setzero_ps(), limit));
+    }
+
+    constexpr uint64_t kNever = ~0ull;
+    constexpr uint32_t kXgkickBufferSize = 0x10000u;
+
+    // Bit for component c (x=0 .. w=3) in a DEST mask (x=8, y=4, z=2, w=1).
+    PS2X_VU1C_INLINE constexpr uint8_t lane(uint32_t component)
+    {
+        return static_cast<uint8_t>(1u << (3u - component));
+    }
+
+    PS2X_VU1C_INLINE uint32_t floatBits(float value)
+    {
+        uint32_t bits = 0;
+        std::memcpy(&bits, &value, sizeof(bits));
+        return bits;
+    }
+
+    PS2X_VU1C_INLINE float bitsFloat(uint32_t bits)
+    {
+        float value = 0.0f;
+        std::memcpy(&value, &bits, sizeof(value));
+        return value;
+    }
+
+    // Same as VU1Interpreter::normalizeOperand: denormals read as signed zero,
+    // Inf/NaN as the signed largest finite value.
+    PS2X_VU1C_INLINE float norm(float value)
+    {
+        uint32_t bits = floatBits(value);
+        const uint32_t exponent = (bits >> 23) & 0xFFu;
+        if (exponent == 0u)
+            bits &= 0x80000000u;
+        else if (exponent == 0xFFu)
+            bits = (bits & 0x80000000u) | 0x7F7FFFFFu;
+        return bitsFloat(bits);
+    }
+
+    // Same as VU1Interpreter::normalizeResult.
+    PS2X_VU1C_INLINE float normResult(float value, uint32_t &laneFlags)
+    {
+        uint32_t bits = floatBits(value);
+        const uint32_t sign = bits & 0x80000000u;
+        const uint32_t magnitude = bits & 0x7FFFFFFFu;
+        const uint32_t exponent = (bits >> 23) & 0xFFu;
+        laneFlags = sign != 0u ? 0x2u : 0u;
+        if (magnitude == 0u)
+            laneFlags |= 0x1u;
+        else if (exponent == 0u)
+        {
+            laneFlags |= 0x5u;
+            bits = sign;
+        }
+        else if (exponent == 0xFFu)
+        {
+            laneFlags |= 0x8u;
+            bits = sign | 0x7F7FFFFFu;
+        }
+        return bitsFloat(bits);
+    }
+
+    // Same as VU1Interpreter::normalizeFmacExactResult.
+    inline uint8_t exactFlags(float &value, long double exact)
+    {
+#if defined(__clang__) || defined(__GNUC__)
+        // std::signbit(long double) is an out-of-line CRT call (_ldsign) on MSVC targets.
+        const bool negative = __builtin_signbit(exact);
+#else
+        const bool negative = std::signbit(exact);
+#endif
+        const long double magnitude = std::fabs(exact);
+        uint8_t flags = negative ? 0x2u : 0u;
+        uint32_t bits = negative ? 0x80000000u : 0u;
+        if (magnitude == 0.0L)
+        {
+            flags |= 0x1u;
+            value = bitsFloat(bits);
+        }
+        else if (magnitude > static_cast<long double>(std::numeric_limits<float>::max()))
+        {
+            flags |= 0x8u;
+            value = bitsFloat(bits | 0x7F7FFFFFu);
+        }
+        else if (magnitude < static_cast<long double>(std::numeric_limits<float>::min()))
+        {
+            flags |= 0x5u;
+            value = bitsFloat(bits);
+        }
+        return flags;
+    }
+
+    // One lane of VU1Interpreter::normalizeFmacResult for an instruction whose exact
+    // result is `exact()`: the fast path is the interpreter's, the slow path recomputes.
+    template <typename Exact>
+    inline uint8_t fmacLane(float &value, bool productSum, float accRaw, Exact exact)
+    {
+        const uint32_t bits = floatBits(value);
+        const uint32_t exponent = (bits >> 23) & 0xFFu;
+        if (exponent >= 2u && exponent <= 253u &&
+            (!productSum || ((floatBits(accRaw) >> 23) & 0xFFu) <= exponent + 16u))
+        {
+            return (bits & 0x80000000u) != 0u ? 0x2u : 0u;
+        }
+        return exactFlags(value, exact());
+    }
+
+    // One lane of VU1Interpreter::calculateFmacProductSticky.
+    inline uint32_t productSticky(float left, float right)
+    {
+        float product = left * right;
+        const uint32_t bits = floatBits(product);
+        const uint32_t exponent = (bits >> 23) & 0xFFu;
+        if (exponent >= 2u && exponent <= 253u)
+            return (bits & 0x80000000u) != 0u ? 0x2u : 0u;
+        return exactFlags(product, static_cast<long double>(left) * static_cast<long double>(right)) & 0xFu;
+    }
+
+    // DEST lanes (x = 8 ... w = 1) as vector lane bits (x = 1 ... w = 8). The mapping
+    // reverses four bits, so it also turns lane bits back into DEST order.
+    PS2X_VU1C_INLINE constexpr uint32_t destLaneBits(uint32_t dest)
+    {
+        return ((dest >> 3) & 1u) | ((dest >> 1) & 2u) | ((dest << 1) & 4u) | ((dest << 3) & 8u);
+    }
+
+    // All-ones in the vector lanes set in `lanes` (x = 1 ... w = 8).
+    PS2X_VU1C_INLINE __m128i laneMask4(uint32_t lanes)
+    {
+        return _mm_setr_epi32((lanes & 1u) != 0u ? -1 : 0, (lanes & 2u) != 0u ? -1 : 0, (lanes & 4u) != 0u ? -1 : 0,
+                              (lanes & 8u) != 0u ? -1 : 0);
+    }
+
+    // norm() on four lanes.
+    inline __m128 norm4(__m128 value)
+    {
+        const __m128i bits = _mm_castps_si128(value);
+        const __m128i exponent = _mm_and_si128(bits, _mm_set1_epi32(0x7F800000));
+        const __m128i sign = _mm_and_si128(bits, _mm_set1_epi32(static_cast<int>(0x80000000u)));
+        const __m128i zeroExponent = _mm_cmpeq_epi32(exponent, _mm_setzero_si128());
+        const __m128i maxExponent = _mm_cmpeq_epi32(exponent, _mm_set1_epi32(0x7F800000));
+        __m128i result = _mm_blendv_epi8(bits, sign, zeroExponent);
+        result = _mm_blendv_epi8(result, _mm_or_si128(sign, _mm_set1_epi32(0x7F7FFFFF)), maxExponent);
+        return _mm_castsi128_ps(result);
+    }
+
+    // Biased exponents of four floats.
+    PS2X_VU1C_INLINE __m128i exponents4(__m128 value)
+    {
+        return _mm_srli_epi32(_mm_slli_epi32(_mm_castps_si128(value), 1), 24);
+    }
+
+    // Lanes whose exponent is in [2, 253]: there fmacLane and productSticky report only the sign.
+    PS2X_VU1C_INLINE __m128i midRange4(__m128i exponent)
+    {
+        return _mm_and_si128(_mm_cmpgt_epi32(exponent, _mm_set1_epi32(1)),
+                             _mm_cmplt_epi32(exponent, _mm_set1_epi32(254)));
+    }
+
+    // Same as the FTOI helper in ps2_vu1_upper.cpp.
+    PS2X_VU1C_INLINE int32_t floatToInt(float value, float scale)
+    {
+        const double scaled = static_cast<double>(value) * static_cast<double>(scale);
+        if (scaled >= static_cast<double>(std::numeric_limits<int32_t>::max()))
+            return std::numeric_limits<int32_t>::max();
+        if (scaled <= static_cast<double>(std::numeric_limits<int32_t>::min()))
+            return std::numeric_limits<int32_t>::min();
+        return static_cast<int32_t>(scaled);
+    }
+
+    // CLIP judgement of one value against +/- the W limit, as in execUpper.
+    inline bool exceedsClipPlane(float value, uint32_t signMask, int32_t limit)
+    {
+        int32_t ordered = 0;
+        const uint32_t bits = floatBits(value) ^ signMask;
+        std::memcpy(&ordered, &bits, sizeof(ordered));
+        return ordered > limit;
+    }
+
+    inline uint32_t clipFlags(const float *xyz, float w)
+    {
+        const uint32_t wBits = floatBits(w);
+        const int32_t limit = (wBits & 0x7F800000u) != 0u ? static_cast<int32_t>(wBits & 0x7FFFFFFFu) : 0x007FFFFF;
+        uint32_t flags = 0u;
+        if (exceedsClipPlane(xyz[0], 0x00000000u, limit))
+            flags |= 0x01u;
+        if (exceedsClipPlane(xyz[0], 0x80000000u, limit))
+            flags |= 0x02u;
+        if (exceedsClipPlane(xyz[1], 0x00000000u, limit))
+            flags |= 0x04u;
+        if (exceedsClipPlane(xyz[1], 0x80000000u, limit))
+            flags |= 0x08u;
+        if (exceedsClipPlane(xyz[2], 0x00000000u, limit))
+            flags |= 0x10u;
+        if (exceedsClipPlane(xyz[2], 0x80000000u, limit))
+            flags |= 0x20u;
+        return flags;
+    }
+
+    struct FlagEntry
+    {
+        uint64_t issue = 0;
+        uint64_t ready = 0;
+        uint32_t mac = 0;
+        uint32_t status = 0;
+        uint32_t extraSticky = 0;
+        uint32_t clip = 0;
+        bool writesMac = false;
+        bool writesStatus = false;
+        bool writesSticky = false;
+        bool writesClip = false;
+    };
+
+    // FMAC operations translated with Exec::fmacVec.
+    enum FmacKind : int
+    {
+        kFmacAdd,
+        kFmacSub,
+        kFmacMul,
+        kFmacMadd,
+        kFmacMsub,
+        kFmacOpmsub,
+        kFmacOpmula
+    };
+
+    enum class Exit : uint8_t
+    {
+        Ended,   // E-bit program end; pipelines flushed like VU1Interpreter::flushPipelines.
+        Handoff, // Stopped at exitPc; the interpreter continues from the exported state.
+        Refused  // Entry PC not handled by this program; nothing was executed.
+    };
+
+    // What a run did to state other than VF/VI/ACC (whose writes show in their ready
+    // cycles), for merging a run that started before the run ahead of it had ended.
+    enum : uint32_t
+    {
+        kEffectMac = 1u << 0,     // MAC written
+        kEffectStatus = 1u << 1,  // status bits 0-3 written (FMAC flags)
+        kEffectDivide = 1u << 2,  // Q and status bits 4-5 written (an FDIV result)
+        kEffectSticky = 1u << 3,  // sticky status bits replaced (FSSET)
+        kEffectClipSet = 1u << 4, // clip flags replaced (FCSET)
+        kEffectI = 1u << 5,       // I written (an I-bit pair)
+    };
+
+    // LOCAL DEBUG: how often translated code handed over at each pair address (printed with PS2X_VU1_STATS).
+    extern std::atomic<uint32_t> g_vu1HandoffHist[2048];
+
+    struct Exec
+    {
+        // Architectural state.
+        float vf[32][4];
+        int32_t vi[16];
+        float acc[4];
+        float q;
+        float i;
+        uint32_t mac;
+        uint32_t status;
+        uint32_t clip;
+        uint32_t top;
+        uint32_t itop;
+
+        // Timing (absolute VU cycles, same clock as VU1Interpreter::m_cycle).
+        uint64_t cycle;
+        uint64_t budgetEnd;
+        uint64_t lastReady;
+        uint64_t vfReady[32][4];
+        uint64_t viReady[16];
+        uint64_t accReady[4];
+
+        // MAC/status/clip writes in issue order (their ready cycles never decrease).
+        FlagEntry flags[16];
+        uint32_t flagHead;
+        uint32_t flagCount;
+        uint32_t workingClip;
+        // Status flags (bits 0-3 form) of fmacLite instructions that took the exact path;
+        // foldLite adds them to the sticky bits.
+        uint32_t liteSticky;
+
+        // FDIV unit (Q).
+        bool fdivPending;
+        uint64_t fdivReady;
+        float fdivValue;
+        uint32_t fdivStatusDi;
+
+        // LOCAL PATCH: EFU unit (P): up to two results in flight (VU1Interpreter::m_efu); results land lazily, when
+        // MFP, WAITP, the next EFU op or an exit looks (commitP), in ready order. efuResource: when the unit accepts
+        // the next EFU instruction.
+        float p;
+        bool efuValid[2];
+        uint64_t efuReady[2];
+        float efuValue[2];
+        uint64_t efuResource;
+
+        // No queued flag write or FDIV result lands before this cycle (kNever when
+        // nothing is queued); lets commitTo return without looking at the queues.
+        uint64_t nextCommit;
+
+        // A branch right after an integer op reads that op's old VI value.
+        bool viBackupValid;
+        uint8_t viBackupReg;
+        int32_t viBackupValue;
+
+        // PATH1 transfer started by XGKICK: qword k is copied at cycle xgIssue + 1 + 2k.
+        bool xgActive;
+        uint32_t xgSource;
+        uint32_t xgCopied;
+        uint32_t xgTagEnd;
+        uint32_t xgTotal;
+        bool xgTagEop;
+        uint64_t xgIssue;
+        uint8_t *xgPacket;
+
+        uint8_t *mem;
+        uint32_t memSize;
+        bool noClip;
+
+        void (*submitGif)(void *user, const uint8_t *data, uint32_t size);
+        void *gifUser;
+        void (*reportError)(void *user, uint32_t code);
+        void *errorUser;
+
+        Exit exit;
+        uint32_t exitPc;
+
+        // kEffect* bits, CLIP instructions run, and the VU memory qwords the run read before
+        // writing all four lanes and wrote (bit q % 64 of word q / 64 for qword q), with the
+        // lanes it wrote of each.
+        uint32_t effects;
+        uint32_t clipWrites;
+        uint64_t memRead[16];
+        uint64_t memWritten[16];
+        uint8_t memLanes[1024];
+        // LOCAL PATCH: only the parallel VU1 workers read the sets above (to check a speculative run against the runs
+        // before it). Runs on the VIF1 thread (96% of them in Shinobi) skip the bookkeeping on every load and store and
+        // the 1.3 KB clear per run (VU1Interpreter::exportCompiledState sets trackMem = false).
+        bool trackMem = true;
+
+        // ------------------------------------------------------------ read and write sets
+
+        PS2X_VU1C_INLINE void noteMemRead(uint32_t address)
+        {
+            if (!trackMem)
+                return;
+            const uint32_t qword = (address >> 4) & 1023u;
+            if (memLanes[qword] != 0xFu)
+                memRead[qword >> 6] |= 1ull << (qword & 63u);
+        }
+
+        PS2X_VU1C_INLINE void noteMemWrite(uint32_t address, uint8_t dest)
+        {
+            if (!trackMem)
+                return;
+            const uint32_t qword = (address >> 4) & 1023u;
+            memLanes[qword] |= dest;
+            memWritten[qword >> 6] |= 1ull << (qword & 63u);
+        }
+
+        void clearMemSets()
+        {
+            std::memset(memRead, 0, sizeof(memRead));
+            std::memset(memWritten, 0, sizeof(memWritten));
+            std::memset(memLanes, 0, sizeof(memLanes));
+        }
+
+        static uint32_t flagEffects(const FlagEntry &entry)
+        {
+            return (entry.writesMac ? kEffectMac : 0u) | (entry.writesStatus ? kEffectStatus : 0u) |
+                   (entry.writesSticky ? kEffectSticky : 0u);
+        }
+
+        // ------------------------------------------------------------ timing
+
+        void noteReady(uint64_t ready)
+        {
+            if (ready > lastReady)
+                lastReady = ready;
+        }
+
+        uint64_t vfStall(uint64_t t, uint32_t reg, uint8_t lanes) const
+        {
+            for (uint32_t component = 0; component < 4u; ++component)
+            {
+                if ((lanes & lane(component)) != 0u)
+                    t = std::max(t, vfReady[reg][component]);
+            }
+            return t;
+        }
+
+        void vfWritten(uint32_t reg, uint8_t lanes, uint64_t ready)
+        {
+            for (uint32_t component = 0; component < 4u; ++component)
+            {
+                if ((lanes & lane(component)) != 0u)
+                    vfReady[reg][component] = ready;
+            }
+            noteReady(ready);
+        }
+
+        uint64_t accStall(uint64_t t, uint8_t lanes) const
+        {
+            for (uint32_t component = 0; component < 4u; ++component)
+            {
+                if ((lanes & lane(component)) != 0u)
+                    t = std::max(t, accReady[component]);
+            }
+            return t;
+        }
+
+        void accWritten(uint8_t lanes, uint64_t ready)
+        {
+            for (uint32_t component = 0; component < 4u; ++component)
+            {
+                if ((lanes & lane(component)) != 0u)
+                    accReady[component] = ready;
+            }
+            noteReady(ready);
+        }
+
+        // ------------------------------------------------------------ flags and Q
+
+        // Applies every MAC/status/clip and Q write that the interpreter would have
+        // committed by cycle t, in its order: flags first, then FDIV, per cycle.
+        PS2X_VU1C_INLINE void commitTo(uint64_t t)
+        {
+            if (t < nextCommit)
+                return;
+            // Usually a single write is due (a CLIP before an FCAND, often with a DIV still
+            // in flight): land it here, as commitDue's loop would, without the call.
+            if (flagCount == 1u && flags[flagHead].ready <= t && (!fdivPending || fdivReady > t))
+            {
+                const FlagEntry &entry = flags[flagHead];
+                if (entry.writesMac)
+                    mac = entry.mac;
+                if (entry.writesStatus)
+                {
+                    const uint32_t current = entry.status & 0xFu;
+                    status = (status & 0xFF0u) | current | ((current | entry.extraSticky) << 6);
+                }
+                if (entry.writesSticky)
+                    status = (status & 0x03Fu) | (entry.status & 0xFC0u);
+                if (entry.writesClip)
+                    clip = entry.clip;
+                effects |= flagEffects(entry);
+                flagHead = (flagHead + 1u) & 15u;
+                flagCount = 0u;
+                nextCommit = fdivPending ? fdivReady : kNever;
+                return;
+            }
+            commitDue(t);
+        }
+
+        // Lands a due FDIV result (Q and its status bits) ahead of queued flag writes.
+        // Those only replace status bits 0-3 and OR into sticky bits 6-9, while FDIV
+        // replaces bits 4-5 and ORs into 10-11, so the order does not matter, unless an
+        // FSSET (which replaces all sticky bits) is queued: programs with FSSET use
+        // commitTo instead.
+        PS2X_VU1C_INLINE void commitQ(uint64_t t)
+        {
+            if (fdivPending && fdivReady <= t)
+            {
+                q = fdivValue;
+                const uint32_t currentDi = fdivStatusDi & 0x30u;
+                status = (status & 0xFCFu) | currentDi | (currentDi << 6);
+                fdivPending = false;
+                effects |= kEffectDivide;
+            }
+        }
+
+        PS2X_VU1C_NOINLINE void commitDue(uint64_t t)
+        {
+            // Nothing observes the values between the writes applied here, so without an
+            // FSSET among them they fold: MAC and clip take the last value written, status
+            // bits 0-3 the last current flags, and the sticky bits collect every write
+            // (FDIV commutes with them, see commitQ).
+            bool fold = true;
+            uint32_t due = 0u;
+            while (due < flagCount && flags[(flagHead + due) & 15u].ready <= t)
+            {
+                if (flags[(flagHead + due) & 15u].writesSticky)
+                    fold = false;
+                ++due;
+            }
+            if (fold)
+            {
+                uint32_t newMac = mac;
+                uint32_t newClip = clip;
+                uint32_t current = 0u;
+                uint32_t sticky = 0u;
+                bool statusWritten = false;
+                for (uint32_t index = 0; index < due; ++index)
+                {
+                    const FlagEntry &entry = flags[(flagHead + index) & 15u];
+                    if (entry.writesMac)
+                        newMac = entry.mac;
+                    if (entry.writesStatus)
+                    {
+                        current = entry.status & 0xFu;
+                        sticky |= current | entry.extraSticky;
+                        statusWritten = true;
+                    }
+                    if (entry.writesClip)
+                        newClip = entry.clip;
+                    effects |= flagEffects(entry);
+                }
+                mac = newMac;
+                clip = newClip;
+                if (statusWritten)
+                    status = (status & 0xFF0u) | current | (sticky << 6);
+                flagHead = (flagHead + due) & 15u;
+                flagCount -= due;
+                commitQ(t);
+                nextCommit = std::min(flagCount != 0u ? flags[flagHead].ready : kNever,
+                                      fdivPending ? fdivReady : kNever);
+                return;
+            }
+            for (;;)
+            {
+                const uint64_t nextFlag = flagCount != 0u ? flags[flagHead].ready : kNever;
+                const uint64_t nextDiv = fdivPending ? fdivReady : kNever;
+                const uint64_t next = std::min(nextFlag, nextDiv);
+                if (next > t)
+                {
+                    nextCommit = next;
+                    return;
+                }
+                while (flagCount != 0u && flags[flagHead].ready <= next)
+                {
+                    const FlagEntry &entry = flags[flagHead];
+                    if (entry.writesMac)
+                        mac = entry.mac;
+                    if (entry.writesStatus)
+                    {
+                        const uint32_t current = entry.status & 0xFu;
+                        status = (status & 0xFF0u) | current | ((current | entry.extraSticky) << 6);
+                    }
+                    if (entry.writesSticky)
+                        status = (status & 0x03Fu) | (entry.status & 0xFC0u);
+                    if (entry.writesClip)
+                        clip = entry.clip;
+                    effects |= flagEffects(entry);
+                    flagHead = (flagHead + 1u) & 15u;
+                    --flagCount;
+                }
+                if (fdivPending && fdivReady <= next)
+                {
+                    q = fdivValue;
+                    const uint32_t currentDi = fdivStatusDi & 0x30u;
+                    status = (status & 0xFCFu) | currentDi | (currentDi << 6);
+                    fdivPending = false;
+                    effects |= kEffectDivide;
+                }
+            }
+        }
+
+        // Queued writes still in flight at cycle t (ready cycles never decrease).
+        uint32_t flagsInFlight(uint64_t t) const
+        {
+            uint32_t count = 0u;
+            while (count < flagCount && flags[(flagHead + flagCount - 1u - count) & 15u].ready > t)
+                ++count;
+            return count;
+        }
+
+        PS2X_VU1C_INLINE FlagEntry *pushFlag(uint64_t t)
+        {
+            // Writes are applied lazily, when an instruction reads flags or Q, at exits
+            // and when the queue fills up. They are applied in the same order either way,
+            // so every value the program or the interpreter observes is the same.
+            if (flagCount >= 12u)
+                commitTo(t);
+            if (flagCount >= 8u && flagsInFlight(t) >= 8u)
+            {
+                // The interpreter has eight flag slots and stops the program when they overflow.
+                fail(0xFFFFFFFFu);
+                return nullptr;
+            }
+            FlagEntry &entry = flags[(flagHead + flagCount) & 15u];
+            ++flagCount;
+            entry = {};
+            entry.issue = t;
+            entry.ready = t + 4u;
+            // Ready cycles never decrease, so this only matters when the queue was empty.
+            if (entry.ready < nextCommit)
+                nextCommit = entry.ready;
+            noteReady(entry.ready);
+            return &entry;
+        }
+
+        PS2X_VU1C_INLINE void fmacFlags(uint64_t t, const uint8_t laneFlags[4], uint8_t dest, uint32_t extraSticky)
+        {
+            if (dest == 0u)
+                return;
+            uint32_t newMac = 0u;
+            uint32_t newStatus = 0u;
+            for (uint32_t component = 0; component < 4u; ++component)
+            {
+                if ((dest & lane(component)) == 0u)
+                    continue;
+                // Z, S, U and O of a lane land in MAC bits 0-3, 4-7, 8-11 and 12-15 (x highest).
+                const uint32_t flagsOfLane = laneFlags[component];
+                const uint32_t spread = (flagsOfLane & 0x1u) | ((flagsOfLane & 0x2u) << 3) |
+                                        ((flagsOfLane & 0x4u) << 6) | ((flagsOfLane & 0x8u) << 9);
+                newMac |= spread << (3u - component);
+                newStatus |= flagsOfLane;
+            }
+            if (FlagEntry *entry = pushFlag(t))
+            {
+                entry->mac = newMac;
+                entry->status = newStatus;
+                entry->extraSticky = extraSticky;
+                entry->writesMac = true;
+                entry->writesStatus = true;
+            }
+        }
+
+        // One FMAC instruction on all four lanes (only DEST lanes count): returns the result
+        // and queues the flags as fmacFlags does. left and right are the operands as stored,
+        // already broadcast or permuted, NOT normalised: translated code runs with DAZ (see
+        // VU1Interpreter::runCompiled), so denormals read as signed zeros, as normalisation
+        // makes them; an infinity or NaN makes the result (and product) one too, which never
+        // passes the fast test below, and the exact path normalises and starts over. accv is
+        // ACC, always normalised (only FMAC results are written to it). A lane whose result
+        // (and, for product sums, product) lies in the normal range reports only its sign in
+        // fmacLane and productSticky, so when every DEST lane does, the flags come from the
+        // sign bits; otherwise the lanes go through fmacLane and productSticky.
+        template <int kKind, bool kProductSum>
+        PS2X_VU1C_INLINE __m128 fmacVec(uint64_t t, uint8_t dest, __m128 left, __m128 right, __m128 accv)
+        {
+            constexpr bool kUsesAcc = kKind == kFmacMadd || kKind == kFmacMsub || kKind == kFmacOpmsub;
+            const __m128 accRaw = accv;
+            const __m128 accNorm = kUsesAcc ? accv : _mm_setzero_ps();
+            const __m128 product = _mm_mul_ps(left, right);
+            __m128 result;
+            if constexpr (kKind == kFmacAdd)
+                result = _mm_add_ps(left, right);
+            else if constexpr (kKind == kFmacSub)
+                result = _mm_sub_ps(left, right);
+            else if constexpr (kKind == kFmacMul || kKind == kFmacOpmula)
+                result = product;
+            else if constexpr (kKind == kFmacMadd)
+                result = _mm_add_ps(accNorm, product);
+            else
+                result = _mm_sub_ps(accNorm, product);
+            if constexpr (kKind == kFmacOpmsub || kKind == kFmacOpmula)
+                result = _mm_blend_ps(result, _mm_setzero_ps(), 0x8); // the cross product has no w
+            if (dest == 0u)
+                return result;
+
+            const uint32_t lanes = destLaneBits(dest);
+            const __m128i resultExponent = exponents4(result);
+            __m128i mid = midRange4(resultExponent);
+            if constexpr (kProductSum)
+                mid = _mm_and_si128(mid, _mm_cmplt_epi32(exponents4(accRaw),
+                                                         _mm_add_epi32(resultExponent, _mm_set1_epi32(17))));
+            __m128i fast = mid;
+            uint32_t zeroOperandLanes = 0u;
+            uint32_t zeroLanes = 0u;
+            if constexpr (kKind == kFmacMul || kKind == kFmacOpmula || kProductSum) // OPMULA multiplies per lane like MUL
+            {
+                // A zero operand (+-0) makes the product exactly +-0 (skinning weights and
+                // unused components do that all the time): exactFlags then reports Z, and S
+                // for -0, for the product and for a result that is zero; a nonzero result is
+                // the accumulator itself. An infinite operand times zero is NaN instead, which
+                // the zero-result requirement keeps out of the fast path.
+                const __m128i absMask = _mm_set1_epi32(0x7FFFFFFF);
+                const __m128i zero = _mm_setzero_si128();
+                const __m128i zeroOperand =
+                    _mm_or_si128(_mm_cmpeq_epi32(_mm_and_si128(_mm_castps_si128(left), absMask), zero),
+                                 _mm_cmpeq_epi32(_mm_and_si128(_mm_castps_si128(right), absMask), zero));
+                const __m128i zeroResult = _mm_cmpeq_epi32(_mm_and_si128(_mm_castps_si128(result), absMask), zero);
+                zeroOperandLanes = static_cast<uint32_t>(_mm_movemask_ps(_mm_castsi128_ps(zeroOperand))) & lanes;
+                zeroLanes = static_cast<uint32_t>(
+                                _mm_movemask_ps(_mm_castsi128_ps(_mm_and_si128(zeroOperand, zeroResult)))) &
+                            lanes;
+                // The product too must be zero: an infinite operand times zero is NaN, and the
+                // cross product's w result is zero whatever its product is.
+                if constexpr (kProductSum)
+                    fast = _mm_or_si128(
+                        _mm_and_si128(mid, midRange4(exponents4(product))),
+                        _mm_and_si128(_mm_and_si128(zeroOperand, _mm_cmpeq_epi32(
+                                                                     _mm_and_si128(_mm_castps_si128(product), absMask), zero)),
+                                      _mm_or_si128(zeroResult, mid)));
+                else
+                    fast = _mm_or_si128(mid, _mm_and_si128(zeroOperand, zeroResult));
+            }
+            if constexpr (kKind == kFmacAdd || kKind == kFmacSub)
+            {
+                // LOCAL PATCH: an ADD/SUB whose SSE result is +-0 cancelled exactly (x - x, 0 + 0): DAZ reads denormal
+                // operands as the signed zeros normalisation makes of them, FTZ is off so a nonzero sum never becomes
+                // zero, and an infinite or NaN operand never gives zero. The exact path then reports Z (and S for -0)
+                // for that same signed zero (round-to-zero gives +0 for x - x in float and double alike). It used to
+                // take the slow exact path every time. PS2X_VU1_SELFTEST=1 checks it against the exact path.
+                const __m128i zeroResult =
+                    _mm_cmpeq_epi32(_mm_and_si128(_mm_castps_si128(result), _mm_set1_epi32(0x7FFFFFFF)), _mm_setzero_si128());
+                zeroLanes = static_cast<uint32_t>(_mm_movemask_ps(_mm_castsi128_ps(zeroResult))) & lanes;
+                fast = _mm_or_si128(fast, zeroResult);
+            }
+            if (g_vu1FastMode || (static_cast<uint32_t>(_mm_movemask_ps(_mm_castsi128_ps(fast))) & lanes) == lanes)
+            {
+                if (g_vu1FastMode)
+                {
+                    result = fastClamp(result);
+                    zeroLanes |= static_cast<uint32_t>(_mm_movemask_ps(_mm_cmpeq_ps(result, _mm_setzero_ps()))) & lanes;
+                }
+                const uint32_t negative = static_cast<uint32_t>(_mm_movemask_ps(result)) & lanes;
+                uint32_t extraSticky = 0u;
+                if constexpr (kProductSum)
+                    extraSticky = ((static_cast<uint32_t>(_mm_movemask_ps(product)) & lanes) != 0u ? 0x2u : 0u) |
+                                  (zeroOperandLanes != 0u ? 0x1u : 0u);
+                if (FlagEntry *entry = pushFlag(t))
+                {
+                    // Z flags in bits 0-3 and S flags in bits 4-7, x highest.
+                    entry->mac = destLaneBits(zeroLanes) | (destLaneBits(negative) << 4);
+                    entry->status = (zeroLanes != 0u ? 0x1u : 0u) | (negative != 0u ? 0x2u : 0u);
+                    entry->extraSticky = extraSticky;
+                    entry->writesMac = true;
+                    entry->writesStatus = true;
+                }
+                return result;
+            }
+            float out[4];
+            _mm_storeu_ps(out, result);
+            fmacVecExact<kKind, kProductSum>(t, dest, left, right, accNorm, out);
+            return _mm_loadu_ps(out);
+        }
+
+        // fmacVec for an instruction whose MAC and status writes no flag read can observe
+        // (vu1rec.py proves it: a later FMAC always lands first). The result is the same;
+        // instead of queueing its flags the instruction only gathers the status bits it
+        // would make sticky: sign bits of the DEST lanes in signAcc, and their magnitudes in
+        // minAbsAcc, which a zero lane makes zero. foldLite adds those to status at exits.
+        template <int kKind, bool kProductSum>
+        PS2X_VU1C_INLINE __m128 fmacLite(uint8_t dest, __m128 left, __m128 right, __m128 accv, __m128i &signAcc,
+                                         __m128i &minAbsAcc)
+        {
+            constexpr bool kUsesAcc = kKind == kFmacMadd || kKind == kFmacMsub || kKind == kFmacOpmsub;
+            const __m128 accRaw = accv;
+            const __m128 accNorm = kUsesAcc ? accv : _mm_setzero_ps();
+            const __m128 product = _mm_mul_ps(left, right);
+            __m128 result;
+            if constexpr (kKind == kFmacAdd)
+                result = _mm_add_ps(left, right);
+            else if constexpr (kKind == kFmacSub)
+                result = _mm_sub_ps(left, right);
+            else if constexpr (kKind == kFmacMul || kKind == kFmacOpmula)
+                result = product;
+            else if constexpr (kKind == kFmacMadd)
+                result = _mm_add_ps(accNorm, product);
+            else
+                result = _mm_sub_ps(accNorm, product);
+            if constexpr (kKind == kFmacOpmsub || kKind == kFmacOpmula)
+                result = _mm_blend_ps(result, _mm_setzero_ps(), 0x8);
+            if (dest == 0u)
+                return result;
+
+            // The same test as fmacVec: lanes passing it keep the SSE result and only
+            // report Z and S (plus the product's S and a zero operand's Z for product sums).
+            const uint32_t lanes = destLaneBits(dest);
+            const __m128i resultExponent = exponents4(result);
+            __m128i mid = midRange4(resultExponent);
+            if constexpr (kProductSum)
+                mid = _mm_and_si128(mid, _mm_cmplt_epi32(exponents4(accRaw),
+                                                         _mm_add_epi32(resultExponent, _mm_set1_epi32(17))));
+            __m128i fast = mid;
+            const __m128i absMask = _mm_set1_epi32(0x7FFFFFFF);
+            if constexpr (kKind == kFmacMul || kKind == kFmacOpmula || kProductSum) // OPMULA multiplies per lane like MUL
+            {
+                const __m128i zero = _mm_setzero_si128();
+                const __m128i zeroOperand =
+                    _mm_or_si128(_mm_cmpeq_epi32(_mm_and_si128(_mm_castps_si128(left), absMask), zero),
+                                 _mm_cmpeq_epi32(_mm_and_si128(_mm_castps_si128(right), absMask), zero));
+                const __m128i zeroResult =
+                    _mm_cmpeq_epi32(_mm_and_si128(_mm_castps_si128(result), absMask), zero);
+                if constexpr (kProductSum)
+                    fast = _mm_or_si128(
+                        _mm_and_si128(mid, midRange4(exponents4(product))),
+                        _mm_and_si128(_mm_and_si128(zeroOperand, _mm_cmpeq_epi32(
+                                                                     _mm_and_si128(_mm_castps_si128(product), absMask), zero)),
+                                      _mm_or_si128(zeroResult, mid)));
+                else
+                    fast = _mm_or_si128(mid, _mm_and_si128(zeroOperand, zeroResult));
+            }
+            if constexpr (kKind == kFmacAdd || kKind == kFmacSub)
+                fast = _mm_or_si128(fast, _mm_cmpeq_epi32(_mm_and_si128(_mm_castps_si128(result), absMask), _mm_setzero_si128()));
+            if (g_vu1FastMode || (static_cast<uint32_t>(_mm_movemask_ps(_mm_castsi128_ps(fast))) & lanes) == lanes)
+            {
+                if (g_vu1FastMode)
+                    result = fastClamp(result);
+                // There a zero result or product only comes from a zero operand, so a zero
+                // magnitude is exactly fmacVec's Z, and the sign bits are its S.
+                const __m128i destMask = laneMask4(lanes);
+                const __m128i resultBits = _mm_castps_si128(result);
+                __m128i sign = _mm_and_si128(resultBits, destMask);
+                __m128i magnitude = _mm_or_si128(_mm_and_si128(resultBits, absMask), _mm_xor_si128(destMask, _mm_set1_epi32(-1)));
+                if constexpr (kProductSum)
+                {
+                    const __m128i productBits = _mm_castps_si128(product);
+                    sign = _mm_or_si128(sign, _mm_and_si128(productBits, destMask));
+                    magnitude = _mm_min_epu32(magnitude, _mm_or_si128(_mm_and_si128(productBits, absMask),
+                                                                      _mm_xor_si128(destMask, _mm_set1_epi32(-1))));
+                }
+                signAcc = _mm_or_si128(signAcc, sign);
+                minAbsAcc = _mm_min_epu32(minAbsAcc, magnitude);
+                return result;
+            }
+            float out[4];
+            _mm_storeu_ps(out, result);
+            fmacVecExact<kKind, kProductSum, true>(0u, dest, left, right, accNorm, out);
+            return _mm_loadu_ps(out);
+        }
+
+        // Adds the status bits gathered by fmacLite to the sticky bits (no FSSET or status
+        // read can come between, vu1rec.py gives programs with those no lite FMACs).
+        void foldLite(__m128i signAcc, __m128i minAbsAcc)
+        {
+            uint32_t sticky = liteSticky;
+            if (_mm_movemask_ps(_mm_castsi128_ps(signAcc)) != 0)
+                sticky |= 0x2u;
+            if (_mm_movemask_ps(_mm_castsi128_ps(_mm_cmpeq_epi32(minAbsAcc, _mm_setzero_si128()))) != 0)
+                sticky |= 0x1u;
+            status |= (sticky & 0xFu) << 6;
+            liteSticky = 0u;
+        }
+
+        // The rare lanes outside the normal range: kept out of line so that every FMAC
+        // instruction of a translated program does not carry a copy. kLite: an fmacLite
+        // instruction, whose flags only go to the sticky bits.
+        template <int kKind, bool kProductSum, bool kLite = false>
+        PS2X_VU1C_NOINLINE void fmacVecExact(uint64_t t, uint8_t dest, __m128 left, __m128 right, __m128 accNorm,
+                                             float out[4])
+        {
+            // The fast path ran on raw operands under DAZ; this one does what the interpreter
+            // does: normalised operands, and no DAZ, which would turn a denormal product into
+            // zero before the accumulate.
+            {
+                // Why the fast test failed, counted once per call (this path is the rare one).
+                g_exactCalls.fetch_add(1u, std::memory_order_relaxed);
+                float l0[4], r0[4];
+                _mm_storeu_ps(l0, left);
+                _mm_storeu_ps(r0, right);
+                int reason = 2;
+                for (uint32_t c = 0; c < 4u; ++c)
+                {
+                    if ((dest & lane(c)) == 0u)
+                        continue;
+                    uint32_t bits;
+                    std::memcpy(&bits, &out[c], sizeof(bits));
+                    const uint32_t exponent = (bits >> 23) & 0xFFu;
+                    if ((bits & 0x7FFFFFFFu) == 0u && l0[c] != 0.0f && r0[c] != 0.0f)
+                        reason = 0;
+                    else if ((exponent == 0u || exponent >= 0xFEu) && reason != 0)
+                        reason = 1;
+                }
+                g_exactReason[reason].fetch_add(1u, std::memory_order_relaxed);
+                g_exactByKind[kKind].fetch_add(1u, std::memory_order_relaxed);
+            }
+            const unsigned int savedCsr = _mm_getcsr();
+            _mm_setcsr(savedCsr & ~0x0040u);
+            left = norm4(left);
+            right = norm4(right);
+            {
+                const __m128 product = _mm_mul_ps(left, right);
+                __m128 result;
+                if constexpr (kKind == kFmacAdd)
+                    result = _mm_add_ps(left, right);
+                else if constexpr (kKind == kFmacSub)
+                    result = _mm_sub_ps(left, right);
+                else if constexpr (kKind == kFmacMul || kKind == kFmacOpmula)
+                    result = product;
+                else if constexpr (kKind == kFmacMadd)
+                    result = _mm_add_ps(accNorm, product);
+                else
+                    result = _mm_sub_ps(accNorm, product);
+                if constexpr (kKind == kFmacOpmsub || kKind == kFmacOpmula)
+                    result = _mm_blend_ps(result, _mm_setzero_ps(), 0x8);
+                _mm_storeu_ps(out, result);
+            }
+            float l[4], r[4], a[4];
+            _mm_storeu_ps(l, left);
+            _mm_storeu_ps(r, right);
+            _mm_storeu_ps(a, accNorm);
+            uint8_t laneFlags[4] = {0, 0, 0, 0};
+            for (uint32_t c = 0; c < 4u; ++c)
+            {
+                if ((dest & lane(c)) == 0u)
+                    continue;
+                // ACC is always normalised, so its raw value is accNorm.
+                laneFlags[c] = fmacLane(out[c], kProductSum, a[c], [&]() -> long double
+                {
+                    const long double lv = l[c];
+                    const long double rv = r[c];
+                    if constexpr (kKind == kFmacAdd)
+                        return lv + rv;
+                    else if constexpr (kKind == kFmacSub)
+                        return lv - rv;
+                    else if constexpr (kKind == kFmacMul)
+                        return lv * rv;
+                    else if constexpr (kKind == kFmacMadd)
+                        return static_cast<long double>(a[c]) + lv * rv;
+                    else if constexpr (kKind == kFmacMsub)
+                        return static_cast<long double>(a[c]) - lv * rv;
+                    else if constexpr (kKind == kFmacOpmsub)
+                        return c == 3u ? 0.0L : static_cast<long double>(a[c]) - lv * rv;
+                    else
+                        return c == 3u ? 0.0L : lv * rv;
+                });
+            }
+            uint32_t sticky = 0u;
+            if constexpr (kProductSum)
+            {
+                for (uint32_t c = 0; c < 4u; ++c)
+                {
+                    if ((dest & lane(c)) != 0u)
+                        sticky |= productSticky(l[c], r[c]);
+                }
+            }
+            if constexpr (kLite)
+            {
+                for (uint32_t c = 0; c < 4u; ++c)
+                {
+                    if ((dest & lane(c)) != 0u)
+                        sticky |= laneFlags[c];
+                }
+                liteSticky |= sticky;
+            }
+            else
+                fmacFlags(t, laneFlags, dest, sticky);
+            _mm_setcsr(savedCsr);
+        }
+
+        void clipFlag(uint64_t t, uint32_t newClip)
+        {
+            ++clipWrites;
+            workingClip = ((workingClip << 6) | (newClip & 0x3Fu)) & 0xFFFFFFu;
+            if (FlagEntry *entry = pushFlag(t))
+            {
+                entry->clip = workingClip;
+                entry->writesClip = true;
+            }
+        }
+
+        void fsset(uint64_t t, uint32_t immediate)
+        {
+            effects |= kEffectSticky;
+            for (uint32_t index = 0; index < flagCount; ++index)
+            {
+                FlagEntry &entry = flags[(flagHead + index) & 15u];
+                if (entry.issue == t)
+                    entry.writesStatus = false;
+            }
+            if (FlagEntry *entry = pushFlag(t))
+            {
+                entry->status = immediate & 0xFC0u;
+                entry->writesSticky = true;
+            }
+        }
+
+        void fcset(uint64_t t, uint32_t newClip)
+        {
+            effects |= kEffectClipSet;
+            workingClip = newClip & 0xFFFFFFu;
+            for (uint32_t index = 0; index < flagCount; ++index)
+            {
+                FlagEntry &entry = flags[(flagHead + index) & 15u];
+                if (entry.issue == t)
+                    entry.writesClip = false;
+            }
+            if (FlagEntry *entry = pushFlag(t))
+            {
+                entry->clip = workingClip;
+                entry->writesClip = true;
+            }
+        }
+
+        void queueQ(uint64_t t, float value, uint32_t latency, uint32_t statusDi)
+        {
+            uint32_t ignored = 0u;
+            fdivPending = true;
+            fdivReady = t + latency;
+            fdivValue = normResult(value, ignored);
+            fdivStatusDi = statusDi & 0x30u;
+            if (fdivReady < nextCommit)
+                nextCommit = fdivReady;
+            noteReady(fdivReady);
+        }
+
+        // Lands the EFU results due by cycle t in ready order (ties: entry order), as the interpreter's
+        // per-cycle commit does.
+        void commitP(uint64_t t)
+        {
+            for (;;)
+            {
+                int pick = -1;
+                for (int entry = 0; entry < 2; ++entry)
+                {
+                    if (efuValid[entry] && efuReady[entry] <= t && (pick < 0 || efuReady[entry] < efuReady[pick]))
+                        pick = entry;
+                }
+                if (pick < 0)
+                    return;
+                p = efuValue[pick];
+                efuValid[pick] = false;
+            }
+        }
+
+        // VU1Interpreter::queueP: the result is visible `latency` cycles after the issue at t, and the unit takes the
+        // next instruction one cycle earlier.
+        void queueP(uint64_t t, float value, uint32_t latency)
+        {
+            commitP(t);
+            uint32_t ignored = 0u;
+            for (int entry = 0; entry < 2; ++entry)
+            {
+                if (!efuValid[entry])
+                {
+                    efuValid[entry] = true;
+                    efuReady[entry] = t + latency;
+                    efuValue[entry] = normResult(value, ignored);
+                    efuResource = t + (latency > 0u ? latency - 1u : 0u);
+                    noteReady(t + latency);
+                    return;
+                }
+            }
+            fail(0xFFFFFFF9u);
+        }
+
+        // WAITP: the cycle by which every EFU result in flight is visible.
+        uint64_t efuWait(uint64_t t) const
+        {
+            for (int entry = 0; entry < 2; ++entry)
+                if (efuValid[entry])
+                    t = std::max(t, efuReady[entry]);
+            return t;
+        }
+
+        // ------------------------------------------------------------ XGKICK and memory
+
+        void fail(uint32_t code)
+        {
+            if (reportError)
+                reportError(errorUser, code);
+        }
+
+        // Copies the next qword of the active transfer (VU1Interpreter::progressXgkick body).
+        void xgCopyQword()
+        {
+            if (xgCopied > kXgkickBufferSize - 16u)
+            {
+                fail(0xFFFFFFFBu);
+                xgActive = false;
+                return;
+            }
+            const uint32_t qwordOffset = xgCopied;
+            const uint32_t sourceOffset = (xgSource + xgCopied) % memSize;
+            noteMemRead(sourceOffset);
+            if (sourceOffset + 16u <= memSize)
+            {
+                std::memcpy(xgPacket + xgCopied, mem + sourceOffset, 16u);
+            }
+            else
+            {
+                for (uint32_t index = 0; index < 16u; ++index)
+                    xgPacket[xgCopied + index] = mem[(xgSource + xgCopied + index) % memSize];
+            }
+            xgCopied += 16u;
+
+            if (xgTagEnd == 0u)
+            {
+                uint64_t tagLo = 0;
+                std::memcpy(&tagLo, xgPacket + qwordOffset, sizeof(tagLo));
+                const uint32_t nloop = static_cast<uint32_t>(tagLo & 0x7FFFu);
+                const uint32_t format = static_cast<uint32_t>((tagLo >> 58) & 0x3u);
+                uint32_t nreg = static_cast<uint32_t>((tagLo >> 60) & 0xFu);
+                if (nreg == 0u)
+                    nreg = 16u;
+                uint64_t tagBytes = 16u;
+                if (format == 0u)
+                    tagBytes += static_cast<uint64_t>(nloop) * nreg * 16u;
+                else if (format == 1u)
+                    tagBytes += ((static_cast<uint64_t>(nloop) * nreg + 1u) & ~1ull) * 8u;
+                else if (format == 2u)
+                    tagBytes += static_cast<uint64_t>(nloop) * 16u;
+                else
+                {
+                    fail(0xFFFFFFF8u);
+                    xgActive = false;
+                    return;
+                }
+                if (tagBytes > kXgkickBufferSize - qwordOffset)
+                {
+                    fail(0xFFFFFFFBu);
+                    xgActive = false;
+                    return;
+                }
+                xgTagEnd = qwordOffset + static_cast<uint32_t>(tagBytes);
+                xgTagEop = ((tagLo >> 15) & 1u) != 0u;
+                if (xgTagEop)
+                    xgTotal = xgTagEnd;
+            }
+
+            if (xgCopied >= xgTagEnd)
+            {
+                if (xgTagEop)
+                {
+                    if (submitGif)
+                        submitGif(gifUser, xgPacket, xgTotal);
+                    xgActive = false;
+                }
+                else
+                {
+                    xgTagEnd = 0u;
+                    xgTagEop = false;
+                }
+            }
+        }
+
+        // Payload qwords of the current GIF tag that can be copied in one run, at most
+        // `limit`: not the tag itself (xgCopyQword parses it) nor the tag's last qword
+        // (xgCopyQword ends the tag or the packet there).
+        uint32_t xgRunLength(uint64_t limit) const
+        {
+            if (xgTagEnd == 0u)
+                return 0u;
+            const uint32_t left = (xgTagEnd - xgCopied) / 16u;
+            if (left <= 1u)
+                return 0u;
+            return static_cast<uint32_t>(std::min<uint64_t>(left - 1u, limit));
+        }
+
+        // Copies `count` payload qwords as xgCopyQword would one by one (the tag was checked
+        // to fit the packet buffer; micro memory wraps on a qword boundary).
+        void xgCopyRun(uint32_t count)
+        {
+            const uint32_t bytes = count * 16u;
+            const uint32_t source = (xgSource + xgCopied) % memSize;
+            for (uint32_t index = 0; index < count; ++index)
+                noteMemRead((source + index * 16u) % memSize);
+            const uint32_t first = std::min(bytes, memSize - source);
+            std::memcpy(xgPacket + xgCopied, mem + source, first);
+            if (first < bytes)
+                std::memcpy(xgPacket + xgCopied + first, mem, bytes - first);
+            xgCopied += bytes;
+        }
+
+        PS2X_VU1C_NOINLINE void xgProgressSlow(uint64_t boundary) { xgProgressTo(boundary); }
+
+        // Performs every qword copy scheduled at or before cycle `boundary`.
+        void xgProgressTo(uint64_t boundary)
+        {
+            while (xgActive)
+            {
+                const uint64_t next = xgIssue + 1u + 2u * static_cast<uint64_t>(xgCopied / 16u);
+                if (next > boundary)
+                    return;
+                if (const uint32_t run = xgRunLength((boundary - next) / 2u + 1u))
+                    xgCopyRun(run);
+                else
+                    xgCopyQword();
+            }
+        }
+
+        // Finishes the transfer and returns the cycle at which it became idle.
+        uint64_t xgFinish()
+        {
+            uint64_t idle = 0;
+            while (xgActive)
+            {
+                const uint64_t index = xgCopied / 16u;
+                if (const uint32_t run = xgRunLength(~0ull))
+                {
+                    xgCopyRun(run);
+                    idle = xgIssue + 1u + 2u * (index + run - 1u);
+                    continue;
+                }
+                idle = xgIssue + 1u + 2u * index;
+                xgCopyQword();
+            }
+            return idle;
+        }
+
+        void xgkick(uint64_t t, int32_t qwordAddress)
+        {
+            xgActive = true;
+            xgSource = (static_cast<uint32_t>(static_cast<uint16_t>(qwordAddress)) * 16u) % memSize;
+            xgCopied = 0u;
+            xgTagEnd = 0u;
+            xgTotal = 0u;
+            xgTagEop = false;
+            xgIssue = t;
+        }
+
+        // Stores land at cycle t + 1, after the PATH1 copies of cycles <= t.
+        PS2X_VU1C_INLINE void store(uint64_t t, uint32_t address, const uint32_t words[4], uint8_t dest)
+        {
+            if (xgActive)
+                xgProgressSlow(t);
+            noteMemWrite(address, dest);
+            // LOCAL PATCH: one 16-byte blend (DEST lanes from words, the rest kept) instead of a copy, a per-lane patch
+            // and a copy back: same bytes, without the partial writes that made the next full-width read of this qword
+            // wait (store-forwarding stall; this helper was the hottest line of the translated programs).
+            uint8_t *target = mem + address;
+            const __m128i current = _mm_loadu_si128(reinterpret_cast<const __m128i *>(target));
+            const __m128i value = _mm_loadu_si128(reinterpret_cast<const __m128i *>(words));
+            _mm_storeu_si128(reinterpret_cast<__m128i *>(target),
+                             _mm_blendv_epi8(current, value, laneMask4(destLaneBits(dest))));
+            noteReady(t + 1u);
+        }
+
+        // LOCAL PATCH: store() without the lastReady update, for fast blocks (vu1rec.py), which keep the latest ready cycle
+        // in their local lrl and hand it to noteReady at every exit. lastReady is only read at program end (Exec::end),
+        // after that; updating it in memory on every store serialised the stores (VU memory writes through a byte pointer
+        // keep the compiler from holding it in a register).
+        PS2X_VU1C_INLINE void storeNoReady(uint64_t t, uint32_t address, const uint32_t words[4], uint8_t dest)
+        {
+            if (xgActive)
+                xgProgressSlow(t);
+            noteMemWrite(address, dest);
+            uint8_t *target = mem + address;
+            const __m128i current = _mm_loadu_si128(reinterpret_cast<const __m128i *>(target));
+            const __m128i value = _mm_loadu_si128(reinterpret_cast<const __m128i *>(words));
+            _mm_storeu_si128(reinterpret_cast<__m128i *>(target),
+                             _mm_blendv_epi8(current, value, laneMask4(destLaneBits(dest))));
+        }
+
+        PS2X_VU1C_INLINE void storeVfNR(uint64_t t, uint32_t address, uint32_t reg, uint8_t dest)
+        {
+            uint32_t words[4];
+            std::memcpy(words, vf[reg], sizeof(words));
+            storeNoReady(t, address, words, dest);
+        }
+
+        PS2X_VU1C_INLINE void storeViNR(uint64_t t, uint32_t address, int32_t value, uint8_t dest)
+        {
+            const uint32_t word = static_cast<uint32_t>(static_cast<uint16_t>(value & 0xFFFF));
+            const uint32_t words[4] = {word, word, word, word};
+            storeNoReady(t, address, words, dest);
+        }
+
+        PS2X_VU1C_INLINE void storeVf(uint64_t t, uint32_t address, uint32_t reg, uint8_t dest)
+        {
+            uint32_t words[4];
+            std::memcpy(words, vf[reg], sizeof(words));
+            store(t, address, words, dest);
+        }
+
+        PS2X_VU1C_INLINE void storeVi(uint64_t t, uint32_t address, int32_t value, uint8_t dest)
+        {
+            const uint32_t word = static_cast<uint32_t>(static_cast<uint16_t>(value & 0xFFFF));
+            const uint32_t words[4] = {word, word, word, word};
+            store(t, address, words, dest);
+        }
+
+        PS2X_VU1C_INLINE void load(uint32_t address, float out[4])
+        {
+            noteMemRead(address);
+            std::memcpy(out, mem + address, 16u);
+        }
+
+        PS2X_VU1C_INLINE int32_t loadVi(uint32_t address, uint8_t dest)
+        {
+            noteMemRead(address);
+            uint32_t component = 3u;
+            if ((dest & 0x8u) != 0u)
+                component = 0u;
+            else if ((dest & 0x4u) != 0u)
+                component = 1u;
+            else if ((dest & 0x2u) != 0u)
+                component = 2u;
+            uint32_t word = 0;
+            std::memcpy(&word, mem + address + component * 4u, sizeof(word));
+            return static_cast<int16_t>(word & 0xFFFFu);
+        }
+
+        PS2X_VU1C_INLINE uint32_t address(int32_t base, int32_t offset) const
+        {
+            return ((static_cast<uint32_t>(base + offset)) * 16u) & (memSize - 1u);
+        }
+
+        uint32_t addressU16(int32_t base) const
+        {
+            return (static_cast<uint32_t>(static_cast<uint16_t>(base)) * 16u) & (memSize - 1u);
+        }
+
+        // ------------------------------------------------------------ program exits
+
+        // E-bit end: flushPipelines() advances until every pending write has landed.
+        void end(uint64_t lastPairCycle, uint32_t resumePc)
+        {
+            uint64_t finalCycle = std::max(lastPairCycle + 1u, lastReady);
+            if (xgActive)
+                finalCycle = std::max(finalCycle, xgFinish());
+            commitTo(finalCycle);
+            commitP(finalCycle);
+            cycle = finalCycle;
+            exitPc = resumePc;
+            exit = Exit::Ended;
+        }
+
+        void handoff(uint32_t pc)
+        {
+            g_vu1HandoffHist[(pc >> 3) & 0x7FFu].fetch_add(1u, std::memory_order_relaxed); // LOCAL DEBUG (PS2X_VU1_STATS)
+            // Hand over only writes still in flight, as committing on every issue would.
+            commitTo(cycle);
+            commitP(cycle);
+            exitPc = pc;
+            exit = Exit::Handoff;
+        }
+    };
+
+    using ProgramFn = void (*)(Exec &x, uint32_t entryPc);
+
+    enum : uint8_t
+    {
+        kInputQ = 1u,
+        kInputI = 2u,
+        kInputMac = 4u,
+        kInputStatus = 8u,
+    };
+
+    // The state left by earlier runs that a run from an MSCAL/MSCNT entry point may read
+    // (vu1rec.py entry_inputs). With these values unchanged the run writes the same values
+    // whatever the rest of the state was.
+    struct EntryInputs
+    {
+        uint16_t pc;
+        uint16_t vi;      // VI registers (bit r)
+        uint8_t acc;      // ACC lanes (lane() bits)
+        uint8_t other;    // kInput* bits
+        uint32_t clip;    // clip flag bits
+        uint8_t vf[32];   // VF lanes per register
+    };
+
+    struct Program
+    {
+        const char *name;
+        const uint8_t *code; // micro memory image the program was translated from
+        uint32_t codeBytes;  // bytes of `code` that must match (up to the last reachable pair)
+        ProgramFn run;
+        // Entry points a run may start from before the run ahead of it has ended, with what
+        // they read of earlier runs' state; none for a program with FSSET.
+        const EntryInputs *entries;
+        uint32_t entryCount;
+
+        const EntryInputs *inputsAt(uint32_t pc) const
+        {
+            for (uint32_t index = 0; index < entryCount; ++index)
+            {
+                if (entries[index].pc == pc)
+                    return &entries[index];
+            }
+            return nullptr;
+        }
+    };
+
+    // Registers a translated program; called from static initialisers in generated code.
+    void registerProgram(const Program *program);
+
+    // Translated program whose image matches micro memory, or nullptr.
+    const Program *findProgram(const uint8_t *microMemory, uint32_t size);
+
+    // Number of registered programs (for diagnostics).
+    uint32_t programCount();
+}
+
+#endif

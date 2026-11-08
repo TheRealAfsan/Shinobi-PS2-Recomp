@@ -1,0 +1,52 @@
+#ifndef PS2_GIF_ARBITER_H
+#define PS2_GIF_ARBITER_H
+
+#include <cstdint>
+#include <functional>
+#include <vector>
+
+enum class GifPathId : uint8_t
+{
+    Path1 = 1,
+    Path2 = 2,
+    Path3 = 3,
+};
+
+struct GifArbiterPacket
+{
+    GifPathId pathId;
+    bool path2DirectHl = false;
+    bool path3Image = false;
+    std::vector<uint8_t> data;
+};
+
+class GifArbiter
+{
+public:
+    using ProcessPacketFn = std::function<void(const uint8_t *, uint32_t)>;
+
+    GifArbiter() = default;
+    explicit GifArbiter(ProcessPacketFn processFn);
+
+    void setProcessPacketFn(ProcessPacketFn fn) { m_processFn = std::move(fn); }
+
+    void submit(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool path2DirectHl = false);
+
+    void drain();
+    // submit() then drain(), without copying the packet when nothing is queued ahead of it
+    // (the usual case: every path but a masked PATH3 drains right away).
+    void submitAndDrain(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool path2DirectHl = false);
+    bool empty() const { return m_queue.empty(); }
+    // The path of the packet this thread is handing to the process function, 0 outside a
+    // dispatch (packets the GS receives without the arbiter, such as XGKICK, come from PATH1).
+    static uint8_t dispatchingPath();
+
+private:
+    ProcessPacketFn m_processFn;
+    std::vector<GifArbiterPacket> m_queue;
+
+    static bool isImagePacket(const uint8_t *data, uint32_t sizeBytes);
+    static uint8_t pathPriority(GifPathId id);
+};
+
+#endif

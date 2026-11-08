@@ -164,8 +164,7 @@ with the log in  game\captures\last_run.log.
 The source code is released under the GPL-3.0 (see LICENSE). The source
 repository does not contain the translated game code: that is generated from
 the game's own program file. The downloadable release contains it only inside
-the finished program (bin\Shinobi.zip, unpacked by the launcher on first
-Play); it holds no game data. A step-by-step
+the finished program (bin\Shinobi.zip, unpacked by the launcher by itself); it holds no game data. A step-by-step
 build guide is still to come; the runtime lives in  devilkings-fork\ps2xRuntime.
 
 

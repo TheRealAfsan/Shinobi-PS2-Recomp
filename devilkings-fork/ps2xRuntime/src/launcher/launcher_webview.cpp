@@ -37,6 +37,7 @@
 #include <filesystem>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -111,6 +112,36 @@ namespace
 
     std::atomic<bool> g_installing{false};
     std::thread g_installThread;
+
+    // The repository keeps the game program zipped (GitHub refuses files over 100 MB). It is unpacked by itself, in the
+    // background when the launcher starts and again when the game file is set up, so the player never sees or does it.
+    std::mutex g_unpackMutex;
+    std::thread g_unpackThread;
+
+    bool unpackGameProgram()
+    {
+        std::lock_guard<std::mutex> lock(g_unpackMutex);
+        std::error_code ec;
+        if (fs::exists(g_runner, ec))
+            return true;
+        const fs::path packed = g_runner.parent_path() / "Shinobi.zip";
+        if (!fs::exists(packed, ec))
+            return false;
+        wchar_t system[MAX_PATH] = {};
+        GetSystemDirectoryW(system, MAX_PATH);
+        std::wstring unpack = L"\"" + std::wstring(system) + L"\\tar.exe\" -xf \"" + packed.wstring() + L"\" -C \"" +
+                              g_runner.parent_path().wstring() + L"\"";
+        STARTUPINFOW info{};
+        info.cb = sizeof(info);
+        PROCESS_INFORMATION process{};
+        if (CreateProcessW(nullptr, unpack.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &info, &process))
+        {
+            WaitForSingleObject(process.hProcess, 180000);
+            CloseHandle(process.hThread);
+            CloseHandle(process.hProcess);
+        }
+        return fs::exists(g_runner, ec);
+    }
 
     // The game's files (extracted from the user's disc image) are in the game folder.
     bool gameInstalled()
@@ -197,6 +228,8 @@ namespace
             g_installThread.join();
         const fs::path destination = g_gameDir;
         g_installThread = std::thread([image, destination]() {
+            postFromThread(L"install:0|Preparing the game program...");
+            unpackGameProgram();
             const launcher::iso::Check check = launcher::iso::check(image, kBootFile);
             if (!check.ok)
             {
@@ -287,28 +320,7 @@ namespace
             error = "The game's files are not set up yet. Open Game File, choose your Shinobi (USA) disc image and press Set up.";
             return false;
         }
-        // The repository keeps the game program zipped (GitHub refuses files over 100 MB): unpack it the first time.
-        if (!fs::exists(g_runner))
-        {
-            const fs::path packed = g_runner.parent_path() / "Shinobi.zip";
-            if (fs::exists(packed))
-            {
-                wchar_t system[MAX_PATH] = {};
-                GetSystemDirectoryW(system, MAX_PATH);
-                std::wstring unpack = L"\"" + std::wstring(system) + L"\\tar.exe\" -xf \"" + packed.wstring() + L"\" -C \"" +
-                                      g_runner.parent_path().wstring() + L"\"";
-                STARTUPINFOW unpackInfo{};
-                unpackInfo.cb = sizeof(unpackInfo);
-                PROCESS_INFORMATION unpackProcess{};
-                if (CreateProcessW(nullptr, unpack.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &unpackInfo,
-                                   &unpackProcess))
-                {
-                    WaitForSingleObject(unpackProcess.hProcess, 180000);
-                    CloseHandle(unpackProcess.hThread);
-                    CloseHandle(unpackProcess.hProcess);
-                }
-            }
-        }
+        unpackGameProgram(); // normally done long before (at start-up and when the game file is set up)
         if (!fs::exists(g_runner))
         {
             error = "Game not found: " + g_runner.string();
@@ -692,7 +704,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show)
         std::error_code ec;
         const fs::path released = g_root / "bin" / "Shinobi.exe";
         const fs::path built = g_root / "devilkings-fork/out/build/ps2xRuntime/ps2EntryRunner.exe";
-        g_runner = fs::path(g_mine.get("paths", "runner", (fs::exists(released, ec) ? released : built).string()));
+        // A release folder has bin\Shinobi.exe, or (just downloaded) bin\Shinobi.zip that is unpacked into it.
+        const bool inRelease = fs::exists(released, ec) || fs::exists(g_root / "bin" / "Shinobi.zip", ec);
+        g_runner = fs::path(g_mine.get("paths", "runner", (inRelease ? released : built).string()));
     }
     g_page = fs::path(g_mine.get("paths", "page", (g_root / "launcher_assets/launcher.html").string()));
     if (const wchar_t *dir = _wgetenv(L"SHINOBI_LAUNCHER_GAMEDIR")) // test hook: work on a copy of settings.ini
@@ -703,8 +717,22 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show)
     if (const char *shot = std::getenv("SHINOBI_LAUNCHER_SHOT"))
         g_shotPath = widen(shot);
 
+    if (g_shotPath.empty())
+        g_unpackThread = std::thread([]() { unpackGameProgram(); }); // the zipped game program, unpacked in the background
+
     if (!fs::exists(g_page))
     {
+        // Started from inside the downloaded .zip (Windows shows the zip like a folder and runs a lone copy of the program):
+        // say what to do instead of failing on a missing file.
+        if (!fs::exists(g_root / "launcher_assets"))
+        {
+            MessageBoxW(nullptr,
+                        L"This launcher was started from inside the downloaded .zip file.\n\n"
+                        L"Please unzip the whole download first: right-click the .zip file, choose \"Extract All...\", then open "
+                        L"the new folder and double-click Shinobi Launcher.exe there.",
+                        L"Shinobi Launcher", MB_ICONINFORMATION);
+            return 1;
+        }
         MessageBoxW(nullptr, (L"The launcher page is missing:\n" + g_page.wstring()).c_str(), L"Shinobi Launcher", MB_ICONERROR);
         return 1;
     }
@@ -741,6 +769,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show)
         TranslateMessage(&message);
         DispatchMessageW(&message);
     }
+    if (g_unpackThread.joinable())
+        g_unpackThread.join();
     if (g_installThread.joinable())
         g_installThread.join(); // a running set-up finishes (the copy is resumable: files already there are skipped)
     if (g_gameProcess)

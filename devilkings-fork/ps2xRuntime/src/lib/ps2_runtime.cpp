@@ -688,6 +688,10 @@ float ps2xWidescreenFactor()
 }
 
 // LOCAL PATCH: one clock for the perf CSV's time_s and the F12 marks, so a mark can be found in the CSV.
+// The statistics text of the window title (written by the presentation's drawFps, read by the title update).
+static std::mutex g_ps2StatsTitleMutex;
+static std::string g_ps2StatsTitle;
+
 static double RunSeconds()
 {
     static const auto s_t0 = std::chrono::steady_clock::now();
@@ -1064,8 +1068,15 @@ static void UpdateStatsTitle(uint64_t currentTick)
     s_lastSecondGameFps = static_cast<double>(games - s_lastGameFrames) / seconds;
     char title[320];
     // The title is short and plain; the statistics are the overlay (the "Debug overlay" switch in the Mod Menu).
-    std::snprintf(title, sizeof(title), "Shinobi (PS2 Recomp) [%s]%s | %.0f fps", rendererTag,
-                  s_scriptedPad ? " [SCRIPTED PAD - your controller is ignored]" : "", s_lastSecondGameFps);
+    std::string stats;
+    {
+        std::lock_guard<std::mutex> lock(g_ps2StatsTitleMutex);
+        stats = g_ps2StatsTitle;
+    }
+    if (stats.empty())
+        stats = "FPS " + std::to_string(static_cast<int>(s_lastSecondGameFps + 0.5));
+    std::snprintf(title, sizeof(title), "Shinobi (PS2 Recomp) [%s]%s | %s", rendererTag,
+                  s_scriptedPad ? " [SCRIPTED PAD - your controller is ignored]" : "", stats.c_str());
     SetWindowTitle(title);
     PerfWriteRow(seconds, currentTick, s_presents / seconds, static_cast<double>(games - s_lastGameFrames) / seconds, rendererTag);
     if (std::getenv("PS2X_STATS_LOG"))
@@ -3951,8 +3962,6 @@ void main()
                 statFrames = frames;
                 statTime = now;
             }
-            if (!showFps)
-                return;
             if (now - sysTime >= 1.0)
             {
                 sysTime = now;
@@ -3981,20 +3990,18 @@ void main()
                     sum += sorted[i];
                 low = 1000.0f / (sum / static_cast<float>(worst));
             }
-            char line1[96], line2[96];
-            std::snprintf(line1, sizeof(line1), "FPS %.0f    AVG %s    1%% LOW %s", fps,
-                          avg > 0.0 ? (std::to_string(static_cast<int>(avg + 0.5))).c_str() : "--",
-                          low > 0.0f ? (std::to_string(static_cast<int>(low + 0.5))).c_str() : "--");
-            std::snprintf(line2, sizeof(line2), "CPU %s    RAM %s    VRAM %s", cpuPercent >= 0 ? (std::to_string(cpuPercent) + "%").c_str() : "--",
+            // The statistics go into the window's title bar (see g_ps2StatsTitle), nothing is drawn over the game.
+            char line[160];
+            std::snprintf(line, sizeof(line), "FPS %.0f | AVG %s | 1%% LOW %s | CPU %s | RAM %s | VRAM %s", fps,
+                          avg > 0.0 ? std::to_string(static_cast<int>(avg + 0.5)).c_str() : "--",
+                          low > 0.0f ? std::to_string(static_cast<int>(low + 0.5f)).c_str() : "--",
+                          cpuPercent >= 0 ? (std::to_string(cpuPercent) + "%").c_str() : "--",
                           ramGb >= 0.0f ? (std::to_string(static_cast<int>(ramGb * 10.0f + 0.5f) / 10) + "." + std::to_string(static_cast<int>(ramGb * 10.0f + 0.5f) % 10) + " GB").c_str() : "--",
                           vramGb >= 0.0f ? (std::to_string(static_cast<int>(vramGb * 10.0f + 0.5f) / 10) + "." + std::to_string(static_cast<int>(vramGb * 10.0f + 0.5f) % 10) + " GB").c_str() : "--");
-            const int size = 18, pad = 7;
-            const int x = static_cast<int>(picture.x) + 12 + pad;
-            const int y = static_cast<int>(picture.y) + 10 + pad;
-            const int width = std::max(MeasureText(line1, size), MeasureText(line2, size));
-            DrawRectangle(x - pad, y - pad, width + pad * 2, size * 2 + 6 + pad * 2, Fade(BLACK, 0.6f));
-            DrawText(line1, x, y, size, fps >= 58.0f ? GREEN : fps >= 45.0f ? YELLOW : RED);
-            DrawText(line2, x, y + size + 6, size, RAYWHITE);
+            {
+                std::lock_guard<std::mutex> lock(g_ps2StatsTitleMutex);
+                g_ps2StatsTitle = line;
+            }
         }
     };
 }

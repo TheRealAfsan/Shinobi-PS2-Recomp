@@ -6,7 +6,10 @@
 2. Run **`Shinobi Launcher.exe`** (it is in the main folder you just unzipped).
 3. Press **Game File**, choose your own Shinobi (USA) disc image, press **Set up game files**, then **Play Game**.
 
-Everything is in this one repository: the launcher, the game program and the source code. You need your own copy of the game: nothing here includes it.
+Everything is in this one repository: the launcher, the game program and the source code.
+
+> ### You must own the game
+> Buy your own copy of **Shinobi (PlayStation 2, USA)** and make a disc image (`.iso`) from your own disc with a DVD drive and a disc-imaging tool. **This repository contains no game, no disc image and no game data**, and it never will. We do not provide, link to or help anyone find a copy of the game. No disc, no game.
 
 ---
 

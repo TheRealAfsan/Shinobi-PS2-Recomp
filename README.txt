@@ -24,6 +24,10 @@ sound code for the parts that must match the PS2 exactly.
 It comes with a launcher (Shinobi Launcher.exe) where you pick your game file,
 set the resolution, frame rate and controls, and press Play.
 
+YOU MUST OWN THE GAME. Buy your own copy of Shinobi (PlayStation 2, USA) and
+make a disc image (.iso) from your own disc with a DVD drive and a disc-imaging
+tool. No disc, no game.
+
 THIS PROJECT DOES NOT CONTAIN THE GAME. No game files, no disc image, no
 game data, artwork or music of the game are included. The launcher's own
 artwork and music are by the author. You need your own copy of

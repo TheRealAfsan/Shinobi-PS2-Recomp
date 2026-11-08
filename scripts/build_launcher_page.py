@@ -589,7 +589,9 @@ L("""  sig(s) {""",
           if (p0.buttons[i] && p0.buttons[i].pressed) held[n] = { next: Infinity };
         });
       }
-      if (pads.length && !(this.state && this.state.listening)) {
+      // While the game is starting or running the controller belongs to the game: Cross would press the launcher's Stop Game button.
+      const gameBusy = !this.ingame && this.state && this.state.launch !== 'idle';
+      if (pads.length && !gameBusy && !(this.state && this.state.listening)) {
         const p = pads[0];
         const btn = (i) => !!(p.buttons[i] && p.buttons[i].pressed);
         const ax = (i) => p.axes[i] || 0;

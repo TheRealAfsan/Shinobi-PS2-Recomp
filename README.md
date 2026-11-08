@@ -2,12 +2,11 @@
 
 ## Download and play
 
-1. Go to the **[Releases page](https://github.com/AfsanHussain/Shinobi-PS2-Recomp/releases/latest)** and download **`Shinobi-PS2-Recomp-win64.zip`**.
-2. Unzip it anywhere (not inside a protected folder such as Program Files).
-3. Run **`Shinobi Launcher.exe`**.
-4. Press **Game File**, choose your own Shinobi (USA) disc image, press **Set up game files**, then **Play Game**.
+1. Click the green **Code** button above, then **Download ZIP**, and unzip it anywhere (not inside a protected folder such as Program Files).
+2. Run **`Shinobi Launcher.exe`** (it is in the main folder you just unzipped).
+3. Press **Game File**, choose your own Shinobi (USA) disc image, press **Set up game files**, then **Play Game**.
 
-You need your own copy of the game: nothing here includes it. The source code on this page is for developers; you do not need it to play.
+Everything is in this one repository: the launcher, the game program and the source code. You need your own copy of the game: nothing here includes it.
 
 ---
 
@@ -76,7 +75,7 @@ The game's streamed music can reach the sound chip with a damaged right channel 
 
 ## Building from source
 
-The source is GPL-3.0 (see `LICENSE`). The source repository does not contain the translated game code: it is generated from the game's own program file. The downloadable release contains it only inside the finished program (`bin/Shinobi.exe`); it holds no game data. A step-by-step build guide is still to come. The runtime is in `devilkings-fork/ps2xRuntime`.
+The source is GPL-3.0 (see `LICENSE`). The source repository does not contain the translated game code: it is generated from the game's own program file. The downloadable release contains it only inside the finished program (`bin/Shinobi.zip`, unpacked by the launcher on first Play); it holds no game data. A step-by-step build guide is still to come. The runtime is in `devilkings-fork/ps2xRuntime`.
 
 ## Credits
 

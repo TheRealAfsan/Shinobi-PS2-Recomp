@@ -287,6 +287,28 @@ namespace
             error = "The game's files are not set up yet. Open Game File, choose your Shinobi (USA) disc image and press Set up.";
             return false;
         }
+        // The repository keeps the game program zipped (GitHub refuses files over 100 MB): unpack it the first time.
+        if (!fs::exists(g_runner))
+        {
+            const fs::path packed = g_runner.parent_path() / "Shinobi.zip";
+            if (fs::exists(packed))
+            {
+                wchar_t system[MAX_PATH] = {};
+                GetSystemDirectoryW(system, MAX_PATH);
+                std::wstring unpack = L"\"" + std::wstring(system) + L"\\tar.exe\" -xf \"" + packed.wstring() + L"\" -C \"" +
+                                      g_runner.parent_path().wstring() + L"\"";
+                STARTUPINFOW unpackInfo{};
+                unpackInfo.cb = sizeof(unpackInfo);
+                PROCESS_INFORMATION unpackProcess{};
+                if (CreateProcessW(nullptr, unpack.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &unpackInfo,
+                                   &unpackProcess))
+                {
+                    WaitForSingleObject(unpackProcess.hProcess, 180000);
+                    CloseHandle(unpackProcess.hThread);
+                    CloseHandle(unpackProcess.hProcess);
+                }
+            }
+        }
         if (!fs::exists(g_runner))
         {
             error = "Game not found: " + g_runner.string();

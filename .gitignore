@@ -1,5 +1,6 @@
 # Your own game and everything made from it never goes into the repository.
-game/
+game/*
+!game/intro/
 saves/
 captures/
 play_shots*/
@@ -17,8 +18,6 @@ build/
 *.pss
 *.sfd
 *.adx
-*.exe
-*.dll
 *.lib
 *.obj
 *.pdb
@@ -26,3 +25,5 @@ build/
 *.bak
 launcher.ini
 settings.ini
+# bin/Shinobi.zip is unpacked to bin/Shinobi.exe by the launcher the first time you press Play.
+bin/Shinobi.exe

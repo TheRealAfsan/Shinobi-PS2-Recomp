@@ -324,7 +324,7 @@ namespace ps2x::settings
                 Definition renderScale{"video", "render_scale", "Render resolution (PCSX2)",
                                        "How many times the PS2's resolution the PCSX2 renderer draws at: 2x is 1280x896, "
                                        "4x is 2560x1792. Higher is sharper and costs only GPU time.",
-                                       Kind::Choice, "2", "PS2X_PCSX2_SCALE", {"1", "2", "3", "4", "6", "8"},
+                                       Kind::Choice, "3", "PS2X_PCSX2_SCALE", {"1", "2", "3", "4", "6", "8"},
                                        {"1x (native, interlaced)", "2x", "3x", "4x", "6x", "8x"}, 0, 0, nullptr, false};
                 renderScale.choiceEnvironment = {"1", "", "3", "4", "6", "8"};
                 add(renderScale);
@@ -338,7 +338,7 @@ namespace ps2x::settings
                      "The PS2's own edge smoothing (GS AA1) on the polygons that ask for it.", Kind::Bool, "false",
                      "RRV_PCSX2_GS_FULL_HWAA1", {}, {}, 0, 0, nullptr, false});
                 Definition aniso{"video", "anisotropic", "Anisotropic filtering (PCSX2)",
-                                 "Sharper textures on surfaces seen at an angle (floors, walls).", Kind::Choice, "off",
+                                 "Sharper textures on surfaces seen at an angle (floors, walls).", Kind::Choice, "2",
                                  "RRV_PCSX2_GS_ANISO", {"off", "2", "4", "8", "16"}, {"Off", "2x", "4x", "8x", "16x"}, 0, 0,
                                  nullptr, false};
                 aniso.choiceEnvironment = {"", "2", "4", "8", "16"};
@@ -352,7 +352,7 @@ namespace ps2x::settings
                 // LOCAL PATCH: done by the window's own shader (casSharpen, ps2_runtime.cpp): PCSX2's CAS runs at its
                 // presentation step, which the bridge's picture never goes through, so RRV_PCSX2_GS_CAS did nothing.
                 add({"video", "sharpening", "Sharpening",
-                     "Contrast adaptive sharpening of the finished picture, 0 = off. Applies at once.", Kind::Number, "0",
+                     "Contrast adaptive sharpening of the finished picture, 0 = off. Applies at once.", Kind::Number, "20",
                      nullptr, {}, {}, 0, 100, "Off", true});
                 Definition fps{"video", "fps_target", "Frame rate target",
                                "60 is the game's own rate. 30 shows a steady, evenly paced 30; 50 shows 5 of every 6 "
@@ -436,7 +436,7 @@ namespace ps2x::settings
                 Definition aspect{"video", "aspect", "Aspect ratio",
                                   "4:3 is the TV shape the game was made for. 16:9, 21:9 and 32:9 widen the camera so you "
                                   "see more to the sides; auto uses your monitor's exact shape. Menus and movies stay 4:3.",
-                                  Kind::Choice, "4:3", "PS2X_WIDESCREEN", {"4:3", "16:9", "21:9", "32:9", "auto", "stretch"},
+                                  Kind::Choice, "16:9", "PS2X_WIDESCREEN", {"4:3", "16:9", "21:9", "32:9", "auto", "stretch"},
                                   {"4:3", "16:9", "21:9 ultrawide", "32:9 super ultrawide", "Auto (monitor)", "Stretch"}, 0,
                                   0, nullptr, false};
                 aspect.choiceEnvironment = {"", "16:9", "21:9", "32:9", "auto", ""};

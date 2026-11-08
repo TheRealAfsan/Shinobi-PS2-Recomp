@@ -1063,9 +1063,9 @@ static void UpdateStatsTitle(uint64_t currentTick)
     s_lastSecondWorstMs = s_perf.gaps.empty() ? 0.0f : *std::max_element(s_perf.gaps.begin(), s_perf.gaps.end());
     s_lastSecondGameFps = static_cast<double>(games - s_lastGameFrames) / seconds;
     char title[320];
-    std::snprintf(title, sizeof(title), "Shinobi PC Port [%s]%s | by therealafsan | %.0f fps (game %.0f, slowest frame %.0f ms) | F8 or L3+R3 = mark a problem | %s",
-                  rendererTag, s_scriptedPad ? " [SCRIPTED PAD - your controller is ignored]" : "", s_presents / seconds,
-                  s_lastSecondGameFps, s_lastSecondWorstMs, ps2x::sysstats::summary().c_str());
+    // The title is short and plain; the statistics are the overlay (the "Debug overlay" switch in the Mod Menu).
+    std::snprintf(title, sizeof(title), "Shinobi (PS2 Recomp) [%s]%s | %.0f fps", rendererTag,
+                  s_scriptedPad ? " [SCRIPTED PAD - your controller is ignored]" : "", s_lastSecondGameFps);
     SetWindowTitle(title);
     PerfWriteRow(seconds, currentTick, s_presents / seconds, static_cast<double>(games - s_lastGameFrames) / seconds, rendererTag);
     if (std::getenv("PS2X_STATS_LOG"))
@@ -1157,9 +1157,8 @@ static void PollMarkHotkey(uint64_t currentTick)
 #if !defined(__ANDROID__)
     static bool s_padWasDown = false;
     bool padDown = false;
-    for (int pad = 0; pad < 4 && !padDown; ++pad)
-        padDown = IsGamepadAvailable(pad) && IsGamepadButtonDown(pad, GAMEPAD_BUTTON_LEFT_THUMB) &&
-                  IsGamepadButtonDown(pad, GAMEPAD_BUTTON_RIGHT_THUMB);
+    // LOCAL PATCH: the controller shortcut (L3 + R3 together) is gone; F8 on the keyboard still marks a problem in the log.
+    (void)padDown;
     const bool padPressed = padDown && !s_padWasDown;
     s_padWasDown = padDown;
     if (!IsKeyPressed(KEY_F8) && !padPressed)
@@ -3754,6 +3753,13 @@ void main()
         uint64_t fpsFrames = 0;
         double fpsTime = 0.0;
         float fps = 0.0f;
+        // statistics overlay (drawFps)
+        std::vector<float> gaps; // ms between game frames, the last 600
+        size_t gapNext = 0;
+        uint64_t statFrames = 0, avgFrames0 = 0;
+        double statTime = 0.0, avgTime0 = 0.0, sysTime = 0.0;
+        int cpuPercent = -1;
+        float ramGb = -1.0f, vramGb = -1.0f;
 
         void apply(Texture2D &frameTex)
         {
@@ -3922,14 +3928,73 @@ void main()
                 fpsFrames = frames;
                 fpsTime = now;
             }
+            // LOCAL PATCH: statistics overlay. The time between game frames is kept for the last 600 frames (the 1% lows are the
+            // average of the slowest 1% of them), the average counts from the first frame, CPU / RAM / VRAM are read once a second.
+            if (frames != statFrames)
+            {
+                if (statFrames != 0 && now > statTime)
+                {
+                    const float gap = static_cast<float>((now - statTime) * 1000.0 / static_cast<double>(frames - statFrames));
+                    if (gap < 1000.0f) // a pause (the F1 menu) is not a slow frame
+                    {
+                        if (gaps.size() < 600)
+                            gaps.push_back(gap);
+                        else
+                            gaps[gapNext++ % 600] = gap;
+                    }
+                }
+                if (avgFrames0 == 0)
+                {
+                    avgFrames0 = frames;
+                    avgTime0 = now;
+                }
+                statFrames = frames;
+                statTime = now;
+            }
             if (!showFps)
                 return;
-            char text[32];
-            std::snprintf(text, sizeof(text), "%.0f FPS", fps);
-            const int x = static_cast<int>(picture.x) + 10;
-            const int y = static_cast<int>(picture.y) + 8;
-            DrawText(text, x + 2, y + 2, 20, BLACK);
-            DrawText(text, x, y, 20, fps >= 58.0f ? GREEN : fps >= 45.0f ? YELLOW : RED);
+            if (now - sysTime >= 1.0)
+            {
+                sysTime = now;
+                const std::string text = ps2x::sysstats::summary();
+                int cpu = -1;
+                float ram = -1.0f, vram = -1.0f;
+                if (const size_t at = text.find("CPU "); at != std::string::npos)
+                    std::sscanf(text.c_str() + at, "CPU %d", &cpu);
+                if (const size_t at = text.find("| RAM "); at != std::string::npos)
+                    std::sscanf(text.c_str() + at, "| RAM %f", &ram);
+                if (const size_t at = text.find("| VRAM "); at != std::string::npos)
+                    std::sscanf(text.c_str() + at, "| VRAM %f", &vram);
+                cpuPercent = cpu;
+                ramGb = ram;
+                vramGb = vram;
+            }
+            const double avg = (avgFrames0 != 0 && now > avgTime0 + 1.0) ? static_cast<double>(frames - avgFrames0) / (now - avgTime0) : 0.0;
+            float low = 0.0f;
+            if (gaps.size() >= 60)
+            {
+                std::vector<float> sorted(gaps);
+                std::sort(sorted.begin(), sorted.end(), std::greater<float>());
+                const size_t worst = std::max<size_t>(1, sorted.size() / 100);
+                float sum = 0.0f;
+                for (size_t i = 0; i < worst; ++i)
+                    sum += sorted[i];
+                low = 1000.0f / (sum / static_cast<float>(worst));
+            }
+            char line1[96], line2[96];
+            std::snprintf(line1, sizeof(line1), "FPS %.0f    AVG %s    1%% LOW %s", fps,
+                          avg > 0.0 ? (std::to_string(static_cast<int>(avg + 0.5))).c_str() : "--",
+                          low > 0.0f ? (std::to_string(static_cast<int>(low + 0.5))).c_str() : "--");
+            std::snprintf(line2, sizeof(line2), "CPU %s    RAM %s    VRAM %s", cpuPercent >= 0 ? (std::to_string(cpuPercent) + "%").c_str() : "--",
+                          ramGb >= 0.0f ? (std::to_string(static_cast<int>(ramGb * 10.0f + 0.5f) / 10) + "." + std::to_string(static_cast<int>(ramGb * 10.0f + 0.5f) % 10) + " GB").c_str() : "--",
+                          vramGb >= 0.0f ? (std::to_string(static_cast<int>(vramGb * 10.0f + 0.5f) / 10) + "." + std::to_string(static_cast<int>(vramGb * 10.0f + 0.5f) % 10) + " GB").c_str() : "--");
+            const int size = 18, pad = 7;
+            const int x = static_cast<int>(picture.x) + 12 + pad;
+            const int y = static_cast<int>(picture.y) + 10 + pad;
+            const int width = std::max(MeasureText(line1, size), MeasureText(line2, size));
+            DrawRectangle(x - pad, y - pad, width + pad * 2, size * 2 + 6 + pad * 2, Fade(BLACK, 0.6f));
+            DrawText(line1, x, y, size, fps >= 58.0f ? GREEN : fps >= 45.0f ? YELLOW : RED);
+            DrawText(line2, x, y + size + 6, size, RAYWHITE);
         }
     };
 }

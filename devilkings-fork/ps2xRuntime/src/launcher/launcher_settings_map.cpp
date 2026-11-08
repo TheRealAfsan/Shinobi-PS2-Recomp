@@ -41,18 +41,18 @@ namespace launcher
 
     std::string pageValues(const SettingGet &get, bool diagnostics)
     {
-        const std::string scale = get("video", "render_scale", "2");
+        const std::string scale = get("video", "render_scale", "3");
         const std::string res = scale == "1"   ? "Native"
                                 : scale == "3" ? "1080p"
                                 : scale == "4" ? "1440p"
                                 : (scale == "6" || scale == "8") ? "4K"
                                                                  : "720p";
-        const std::string aspect = get("video", "aspect", "4:3");
+        const std::string aspect = get("video", "aspect", "16:9");
         const bool ws = aspect == "16:9" || aspect == "21:9" || aspect == "32:9" || aspect == "auto";
         const std::string shape = aspect == "auto" ? "Auto" : ws ? aspect : "16:9";
-        const std::string aniso = get("video", "anisotropic", "off");
+        const std::string aniso = get("video", "anisotropic", "2");
         const int tex = aniso == "2" ? 1 : aniso == "4" ? 2 : aniso == "8" ? 3 : aniso == "16" ? 4 : 0;
-        const int sharp = std::atoi(get("video", "sharpening", "0").c_str());
+        const int sharp = std::atoi(get("video", "sharpening", "20").c_str());
         const int fx = sharp <= 0 ? 0 : sharp <= 25 ? 1 : sharp <= 50 ? 2 : sharp <= 75 ? 3 : 4;
         const std::string aa = truthy(get("video", "edge_aa", "false"))     ? "Edge AA"
                                : truthy(get("video", "antialias", "false")) ? "FXAA"

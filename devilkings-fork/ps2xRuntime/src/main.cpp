@@ -24,6 +24,11 @@ namespace ps2x
 #include <algorithm>
 #include <cstdlib>
 
+#if defined(_WIN32)
+extern "C" __declspec(dllimport) int __stdcall TerminateProcess(void *process, unsigned int code);
+extern "C" __declspec(dllimport) void *__stdcall GetCurrentProcess(void);
+#endif
+
 #if defined(__ANDROID__)
 #include <android/log.h>
 #include <android/native_activity.h>
@@ -367,6 +372,11 @@ int main(int argc, char *argv[])
 #endif
         std::cout.flush();
         std::cerr.flush();
+#if defined(_WIN32)
+        // LOCAL PATCH: leave without running the DLLs' exit code. The graphics DLL's cleanup (the renderer's and the texture
+        // cache's destructors) crashed at every exit and wrote a crash dump. Everything is saved and flushed by now.
+        TerminateProcess(GetCurrentProcess(), 0);
+#endif
         std::_Exit(0);
     }
     catch (const std::exception &e)

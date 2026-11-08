@@ -1906,6 +1906,9 @@ bool PS2Runtime::initialize(const char *title)
         const bool legacyHostTimer = std::getenv("PS2X_HOST_FPS60") != nullptr;
         SetConfigFlags(legacyHostTimer ? FLAG_WINDOW_RESIZABLE : (FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT));
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
+        // LOCAL PATCH: raylib closes the window when Escape is pressed. Escape is Circle (cancel / back) in the default key
+        // bindings, so backing out of a menu quit the whole game. Closing is the window's X, Alt+F4 or the F1 menu's Quit.
+        SetExitKey(KEY_NULL);
         InitAudioDevice();
         m_audioBackend.setAudioReady(IsAudioDeviceReady());
         if (IsAudioDeviceReady() && m_iopSubsystem)
@@ -3467,6 +3470,11 @@ void PS2Runtime::kickGifDmaChainFromMMIO(uint8_t *rdram,
 
 void PS2Runtime::requestStop()
 {
+    // LOCAL DEBUG: the game used to close by itself with nothing in the log. Say when and what the keys were doing.
+    if (!m_stopRequested.load(std::memory_order_relaxed))
+        std::fprintf(stderr, "[stop] the game was asked to stop (window closing: %d, Alt down: %d, Escape down: %d)\n",
+                     IsWindowReady() ? (WindowShouldClose() ? 1 : 0) : -1, IsWindowReady() ? (IsKeyDown(KEY_LEFT_ALT) ? 1 : 0) : -1,
+                     IsWindowReady() ? (IsKeyDown(KEY_ESCAPE) ? 1 : 0) : -1);
     m_stopRequested.store(true, std::memory_order_relaxed);
     if (m_eeScheduler)
     {

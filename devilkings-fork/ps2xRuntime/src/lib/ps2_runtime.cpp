@@ -3931,7 +3931,8 @@ void main()
         void drawFps(const Rectangle &picture)
         {
             const double now = GetTime();
-            const uint64_t frames = ps2x::settings::gameFrames();
+            extern std::atomic<uint64_t> g_ps2SwapCount; // the game's own buffer swaps: this is the counter that ticks on every path
+            const uint64_t frames = g_ps2SwapCount.load(std::memory_order_relaxed);
             if (now - fpsTime >= 0.5)
             {
                 if (fpsTime > 0.0)

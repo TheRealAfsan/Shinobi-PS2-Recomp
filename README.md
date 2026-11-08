@@ -71,6 +71,7 @@ The game's streamed music can reach the sound chip with a damaged right channel 
 
 ## Known issues
 
+- **21:9 widescreen is experimental:** a pink square can appear when an enemy dies, and the game can crash. 4:3 and 16:9 (with or without the widescreen hack) are fine. Use 16:9 on an ultra-wide screen for now.
 - Frame rate can dip in the heaviest fights.
 - Music is the same in both ears by default (see the sound note).
 - Screen effects (fog, glow, blur) at high resolutions are not fully checked.

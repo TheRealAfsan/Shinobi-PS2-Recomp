@@ -150,6 +150,9 @@ off and hear the music as the game sends it.
   8. KNOWN ISSUES
 ------------------------------------------------------------------------------
 
+  - 21:9 widescreen is experimental: a pink square can appear when an enemy
+    dies, and the game can crash. 4:3 and 16:9 are fine; use 16:9 on an
+    ultra-wide screen for now.
   - Frame rate can dip in the heaviest fights (the CPU is the limit).
   - Music is mono-in-both-ears by default (see SOUND NOTE).
   - Screen effects (fog, glow, blur) at high resolutions are not fully checked.

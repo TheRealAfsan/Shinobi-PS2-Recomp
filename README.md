@@ -24,7 +24,12 @@ Reddit: <https://www.reddit.com/user/Afsan23/>
 
 The game's own program is translated ("recompiled") to run natively on Windows. PCSX2's graphics (GS) and sound (SPU2) code is used for the parts that have to match the PS2 exactly. A launcher lets you pick your game file, set resolution, frame rate and controls, and press Play.
 
-![The launcher, with its default settings: 1080p, D3D11, 60 fps, widescreen 16:9, V-Sync, 2x textures, low sharpening](docs/screenshots/launcher.png)
+## Screenshots
+
+![Combat](docs/screenshots/combat.jpg)
+![Running through the streets](docs/screenshots/street-run.jpg)
+![Group fight](docs/screenshots/group-fight.jpg)
+![Ninja magic](docs/screenshots/ninja-magic.jpg)
 
 ## What you need
 
@@ -46,8 +51,6 @@ Developed on a Ryzen 7 9800X3D and a GeForce RTX 5080. The CPU is the main limit
 
 The launcher remembers where your game file is and shows it under the Game File button.
 
-![Game File: choose your own disc image, the launcher checks it and sets the game's files up for you](docs/screenshots/game-file.png)
-
 ## Controls
 
 Everything can be changed in **Configure Controller** (and the in-game menu, F1).
@@ -61,8 +64,6 @@ Everything can be changed in **Configure Controller** (and the in-game menu, F1)
 | Start / Select | Enter / Tab |
 | Camera (right stick) | I K J L |
 
-![Configure Controller: every button can be changed, including the four camera keys](docs/screenshots/controller.png)
-
 - **Mouse:** moves the camera; left click = Square, right click = Circle; **F10** switches it on and off.
 - **Controllers:** DualSense, DualSense Edge, DualShock 4 and Xbox (360, One, Series) use the standard layout. Only the DualSense Edge is tested so far.
 - **In game:** F1 or Select+Start = menu (pauses), Alt+Enter or F11 = window / full screen, F8 = mark a problem in the log.
@@ -70,8 +71,6 @@ Everything can be changed in **Configure Controller** (and the in-game menu, F1)
 ## Mod Menu and statistics
 
 The **Mod Menu** has the studio intro, skipping the start-up logos, full screen, fast VU maths, diagnostics and more.
-
-![The Mod Menu](docs/screenshots/mod-menu.png)
 
 The window's title bar shows live statistics: `FPS 60 | AVG 60 | 1% LOW 49 | CPU 4% | RAM 0.9 GB | VRAM 0.2 GB` (windowed mode). Nothing is drawn over the game.
 

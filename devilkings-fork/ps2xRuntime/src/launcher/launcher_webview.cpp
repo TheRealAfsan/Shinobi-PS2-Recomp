@@ -782,6 +782,20 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show)
         if (play)
         {
             std::string error;
+            // No settings.ini yet (never saved from the launcher): write the launcher's defaults first, so the game does
+            // not start on its own built-in ones.
+            if (!fs::exists(g_gameDir / "settings.ini"))
+            {
+                const char *defaults[][3] = {{"video", "renderer", "pcsx2"},       {"video", "render_scale", "3"},
+                                             {"video", "pcsx2_renderer", "d3d11"}, {"video", "fps_target", "60"},
+                                             {"video", "aspect", "16:9"},          {"video", "vsync", "true"},
+                                             {"video", "anisotropic", "2"},        {"video", "sharpening", "20"},
+                                             {"video", "antialias", "false"},      {"video", "edge_aa", "false"},
+                                             {"audio", "stereo_repair", "copy_left"}, {"saves", "memcard_folder", "../saves/mc0"}};
+                for (const auto &d : defaults)
+                    g_game.set(d[0], d[1], d[2]);
+                g_game.save((g_gameDir / "settings.ini").string());
+            }
             if (!startGame(error))
             {
                 MessageBoxW(nullptr, widen(error).c_str(), L"Shinobi", MB_ICONERROR);

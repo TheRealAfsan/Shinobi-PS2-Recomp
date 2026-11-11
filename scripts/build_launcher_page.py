@@ -428,7 +428,7 @@ L("""    this.defaults = { res: '1080p', renderer: 'Vulkan', ws: true, vsync: fa
   """    // Defaults: the game's own (ps2_settings.cpp) where it has them.
     this.defaults = { res: '1080p', renderer: 'D3D11', fps: '60', ws: true, wsShape: '16:9', vsync: true, tex: 1, fx: 1, aa: 'Off', msaa: 4 };
     this.defBinds = { up: 'UP,W', down: 'DOWN,S', left: 'LEFT,A', right: 'RIGHT,D', cross: 'X,SPACE', circle: 'C,ESCAPE', square: 'Z,KP_0', triangle: 'V,KP_1', l1: 'Q', r1: 'E', l2: 'LEFT_SHIFT', r2: 'RIGHT_SHIFT', start: 'ENTER', select: 'TAB' };
-    this.defMods = { studio: true, nscale: true, rr5fix: false, dropst: false, record: false, intro: false, fastvu: false, dbg: false, full: false, diag: false, legacy: false };
+    this.defMods = { studio: true, nscale: true, rr5fix: false, dropst: false, record: false, intro: false, fastvu: false, dbg: false, full: true, diag: false, legacy: false };
     const init = window.__launcherInit || null;
     const start = Object.assign({}, this.defaults, init ? init.settings : {});
     this.state = Object.assign({}, start, {

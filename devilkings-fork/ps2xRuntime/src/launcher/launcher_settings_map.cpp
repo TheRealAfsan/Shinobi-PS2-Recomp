@@ -71,7 +71,7 @@ namespace launcher
             js << (first ? "" : ",") << bind.key << ":" << jsonString(get("controls", bind.key, bind.fallback));
             first = false;
         }
-        const std::string window = get("video", "window", "windowed");
+        const std::string window = get("video", "window", "borderless");
         js << "},mods:{intro:" << b(truthy(get("game", "skip_intro", "false")))
            << ",studio:" << b(truthy(get("game", "studio_intro", "true"))) << ",full:" << b(window != "windowed")
            << ",fastvu:" << b(get("performance", "fast_vu", "off") == "on")
@@ -110,7 +110,7 @@ namespace launcher
         const std::string fps = get("fps", "60");
         set("video", "fps_target", fps == "Unlocked" ? std::string("unlocked") : (fps == "30" || fps == "50") ? fps : std::string("60"));
         // Fullscreen on: keep exclusive "fullscreen" if that is what the file has, else borderless.
-        const std::string window = read("video", "window", "windowed");
+        const std::string window = read("video", "window", "borderless");
         set("video", "window", get("mod.full", "0") == "1" ? (window == "fullscreen" ? window : std::string("borderless"))
                                                            : std::string("windowed"));
         set("performance", "fast_vu", get("mod.fastvu", "0") == "1" ? "on" : "off");

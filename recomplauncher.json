@@ -39,6 +39,7 @@
         "video/sharpening": "20",
         "video/antialias": "false",
         "video/edge_aa": "false",
+        "video/window": "borderless",
         "audio/stereo_repair": "copy_left",
         "saves/memcard_folder": "../saves/mc0"
       }
@@ -124,10 +125,10 @@
       "id": "window", "label": "Window",
       "help": "Alt+Enter or F11 also switches in game.",
       "choices": [
-        { "label": "Windowed", "set": { "video/window": "windowed" } },
-        { "label": "Fullscreen", "set": { "video/window": "borderless" } }
+        { "label": "Fullscreen (borderless)", "set": { "video/window": "borderless" } },
+        { "label": "Windowed", "set": { "video/window": "windowed" } }
       ],
-      "defaults": { "video/window": "windowed" }
+      "defaults": { "video/window": "borderless" }
     }
   ]
 }

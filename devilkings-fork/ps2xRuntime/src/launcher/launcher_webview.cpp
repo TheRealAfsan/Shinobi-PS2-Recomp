@@ -790,7 +790,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show)
                                              {"video", "pcsx2_renderer", "d3d11"}, {"video", "fps_target", "60"},
                                              {"video", "aspect", "16:9"},          {"video", "vsync", "true"},
                                              {"video", "anisotropic", "2"},        {"video", "sharpening", "20"},
-                                             {"video", "antialias", "false"},      {"video", "edge_aa", "false"},
+                                             {"video", "antialias", "false"},      {"video", "edge_aa", "false"}, {"video", "window", "borderless"},
                                              {"audio", "stereo_repair", "copy_left"}, {"saves", "memcard_folder", "../saves/mc0"}};
                 for (const auto &d : defaults)
                     g_game.set(d[0], d[1], d[2]);

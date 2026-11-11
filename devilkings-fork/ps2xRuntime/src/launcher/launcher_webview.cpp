@@ -717,6 +717,84 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show)
     if (const char *shot = std::getenv("SHINOBI_LAUNCHER_SHOT"))
         g_shotPath = widen(shot);
 
+    // Windowless modes for RecompLauncher (recomplauncher.json). Without these arguments nothing changes.
+    //   --prepare --game <disc image>   unpack the game program, check the image, copy the game's files out of it
+    //   --play                          start the game the same way Play does and wait for it to close
+    {
+        int argc = 0;
+        LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        bool prepare = false, play = false;
+        fs::path image;
+        for (int i = 1; argv && i < argc; ++i)
+        {
+            const std::wstring a = argv[i];
+            if (a == L"--prepare")
+                prepare = true;
+            else if (a == L"--play")
+                play = true;
+            else if (a == L"--game" && i + 1 < argc)
+                image = argv[++i];
+        }
+        if (argv)
+            LocalFree(argv);
+        auto say = [](const std::string &line) {
+            const std::string text = line + "\n";
+            DWORD written = 0;
+            WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), text.data(), static_cast<DWORD>(text.size()), &written, nullptr);
+        };
+        if (prepare)
+        {
+            if (image.empty())
+                image = fs::path(widen(g_mine.get("game", "iso", "")));
+            say("progress 0.02 Unpacking the game program");
+            if (!unpackGameProgram())
+            {
+                say("error The game program (bin\\Shinobi.zip) could not be unpacked.");
+                return 2;
+            }
+            const launcher::iso::Check check = launcher::iso::check(image, kBootFile);
+            if (!check.ok)
+            {
+                say("error " + check.message);
+                return 3;
+            }
+            g_mine.set("game", "iso", narrow(image.wstring()));
+            g_mine.save((g_root / "launcher.ini").string());
+            int lastPercent = -1;
+            const std::string error = launcher::iso::extractAll(image, g_gameDir, [&](int percent, const std::string &file) {
+                if (percent != lastPercent)
+                {
+                    lastPercent = percent;
+                    char line[64];
+                    snprintf(line, sizeof(line), "progress %.2f ", 0.05 + 0.95 * percent / 100.0);
+                    say(line + file);
+                }
+                return true;
+            });
+            if (!error.empty())
+            {
+                say("error " + error);
+                return 4;
+            }
+            say("progress 1.00 Done");
+            return 0;
+        }
+        if (play)
+        {
+            std::string error;
+            if (!startGame(error))
+            {
+                MessageBoxW(nullptr, widen(error).c_str(), L"Shinobi", MB_ICONERROR);
+                return 5;
+            }
+            WaitForSingleObject(g_gameProcess, INFINITE);
+            DWORD code = 0;
+            GetExitCodeProcess(g_gameProcess, &code);
+            CloseHandle(g_gameProcess);
+            return static_cast<int>(code);
+        }
+    }
+
     if (g_shotPath.empty())
         g_unpackThread = std::thread([]() { unpackGameProgram(); }); // the zipped game program, unpacked in the background
 

@@ -26,10 +26,17 @@ The game's own program is translated ("recompiled") to run natively on Windows. 
 
 ## Screenshots
 
-![Combat](docs/screenshots/combat.jpg)
-![Running through the streets](docs/screenshots/street-run.jpg)
-![Group fight](docs/screenshots/group-fight.jpg)
-![Ninja magic](docs/screenshots/ninja-magic.jpg)
+<p align="center">
+<img src="docs/screenshots/combat.jpg" width="49%"> <img src="docs/screenshots/street-run.jpg" width="49%"><br>
+<img src="docs/screenshots/group-fight.jpg" width="49%"> <img src="docs/screenshots/ninja-magic.jpg" width="49%">
+</p>
+
+### The launcher
+
+<p align="center"><img src="docs/screenshots/launcher.png" width="90%"></p>
+<p align="center">
+<img src="docs/screenshots/graphics-settings.png" height="380"> <img src="docs/screenshots/resolution.png" height="380"> <img src="docs/screenshots/mod-menu.png" height="380">
+</p>
 
 ## What you need
 

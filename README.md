@@ -24,19 +24,18 @@ Reddit: <https://www.reddit.com/user/Afsan23/>
 
 The game's own program is translated ("recompiled") to run natively on Windows. PCSX2's graphics (GS) and sound (SPU2) code is used for the parts that have to match the PS2 exactly. A launcher lets you pick your game file, set resolution, frame rate and controls, and press Play.
 
-## Screenshots
 
-<p align="center">
-<img src="docs/screenshots/combat.jpg" width="49%"> <img src="docs/screenshots/street-run.jpg" width="49%"><br>
-<img src="docs/screenshots/group-fight.jpg" width="49%"> <img src="docs/screenshots/ninja-magic.jpg" width="49%">
-</p>
+<p align="center"><img src="docs/screenshots/launcher.png" width="100%"></p>
 
-### The launcher
+A few moments from the game:
 
-<p align="center"><img src="docs/screenshots/launcher.png" width="90%"></p>
-<p align="center">
-<img src="docs/screenshots/graphics-settings.png" height="380"> <img src="docs/screenshots/resolution.png" height="380"> <img src="docs/screenshots/mod-menu.png" height="380">
-</p>
+<p align="center"><img src="docs/screenshots/combat.jpg" width="100%"></p>
+
+<p align="center"><img src="docs/screenshots/street-run.jpg" width="100%"></p>
+
+<p align="center"><img src="docs/screenshots/group-fight.jpg" width="100%"></p>
+
+<p align="center"><img src="docs/screenshots/ninja-magic.jpg" width="100%"></p>
 
 ## What you need
 
@@ -58,6 +57,14 @@ Developed on a Ryzen 7 9800X3D and a GeForce RTX 5080. The CPU is the main limit
 
 The launcher remembers where your game file is and shows it under the Game File button.
 
+<p align="center"><img src="docs/screenshots/game-file.png" width="70%"></p>
+
+Graphics are set in the launcher: resolution up to 4K, D3D11 or Vulkan, frame rate, widescreen hack, V-Sync, texture quality and sharpening.
+
+<p align="center"><img src="docs/screenshots/graphics-settings.png" width="40%"></p>
+
+<p align="center"><img src="docs/screenshots/resolution.png" width="40%"></p>
+
 ## Controls
 
 Everything can be changed in **Configure Controller** (and the in-game menu, F1).
@@ -75,9 +82,15 @@ Everything can be changed in **Configure Controller** (and the in-game menu, F1)
 - **Controllers:** DualSense, DualSense Edge, DualShock 4 and Xbox (360, One, Series) use the standard layout. Only the DualSense Edge is tested so far.
 - **In game:** F1 or Select+Start = menu (pauses), Alt+Enter or F11 = window / full screen, F8 = mark a problem in the log.
 
+
+<p align="center"><img src="docs/screenshots/controller.png" width="70%"></p>
+
 ## Mod Menu and statistics
 
 The **Mod Menu** has the studio intro, skipping the start-up logos, full screen, fast VU maths, diagnostics and more.
+
+<p align="center"><img src="docs/screenshots/mod-menu.png" width="70%"></p>
+
 
 The window's title bar shows live statistics: `FPS 60 | AVG 60 | 1% LOW 49 | CPU 4% | RAM 0.9 GB | VRAM 0.2 GB` (windowed mode). Nothing is drawn over the game.
 

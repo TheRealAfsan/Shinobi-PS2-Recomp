@@ -28,6 +28,7 @@
       "id": "main",
       "format": "ini",
       "file": [{ "path": "{install}/game/settings.ini" }],
+      "ensure": { "video/window": "borderless", "video/aspect": "16:9" },
       "new": {
         "video/renderer": "pcsx2",
         "video/render_scale": "3",

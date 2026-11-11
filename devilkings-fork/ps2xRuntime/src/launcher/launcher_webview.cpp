@@ -784,7 +784,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show)
             std::string error;
             // No settings.ini yet (never saved from the launcher): write the launcher's defaults first, so the game does
             // not start on its own built-in ones.
-            if (!fs::exists(g_gameDir / "settings.ini"))
+            if (!fs::exists(g_gameDir / "settings.ini") || g_game.get("video", "window", "").empty())
             {
                 const char *defaults[][3] = {{"video", "renderer", "pcsx2"},       {"video", "render_scale", "3"},
                                              {"video", "pcsx2_renderer", "d3d11"}, {"video", "fps_target", "60"},
@@ -793,7 +793,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show)
                                              {"video", "antialias", "false"},      {"video", "edge_aa", "false"}, {"video", "window", "borderless"},
                                              {"audio", "stereo_repair", "copy_left"}, {"saves", "memcard_folder", "../saves/mc0"}};
                 for (const auto &d : defaults)
-                    g_game.set(d[0], d[1], d[2]);
+                    if (g_game.get(d[0], d[1], "").empty()) // only keys the file does not have yet
+                        g_game.set(d[0], d[1], d[2]);
                 g_game.save((g_gameDir / "settings.ini").string());
             }
             if (!startGame(error))

@@ -20,19 +20,27 @@ Reddit: <https://www.reddit.com/user/Afsan23/>
 
 > **This repository does not contain the game.** No disc image, no game files and no game data. The launcher's artwork and music are the author's own. You need your own copy of Shinobi (PS2, USA, SLUS-20459), made into an image file from the disc you own.
 
-## What this is
+## Shinobi PS2 recompiled v0.3: Early Access (patch notes)
 
-The game's own program is translated ("recompiled") to run natively on Windows. PCSX2's graphics (GS) and sound (SPU2) code is used for the parts that have to match the PS2 exactly. A launcher lets you pick your game file, set resolution, frame rate and controls, and press Play.
+It is playable. This is early access: expect bugs, and updates will follow (v0.4 is next).
 
+The game's own program is translated ("recompiled") to run natively on Windows. PCSX2's graphics (GS) and sound (SPU2) code is used for the parts that have to match the PS2 exactly.
 
-<p align="center"><img src="docs/screenshots/launcher.png" width="100%"><br><sub>The launcher: 1080p, D3D11, 60 fps, widescreen 16:9, V-Sync and 2x textures are on by default.</sub></p>
+<p align="center">
+<img src="docs/screenshots/launcher.png" width="100%">
+<br><sub>Beautiful new launcher, with a wide range of options to your taste. Defaults: 1080p, D3D11, 60 fps, widescreen 16:9, V-Sync, 2x textures.</sub></p>
 
+### Major fixes in short
 
+1. **Sound** is much improved: the PCSX2 sound chip emulation is now the default (see the sound note below).
+2. **Close to 60 fps**, with dips in close-ups that are normally unnoticeable.
+3. **A launcher made for the game**, also reachable in game with the press of a button (F1).
+4. **Now live on GitHub**, and submitted to RecompStore and Recomp Haven, awaiting approval.
+5. **Twilight Orchard**, my video game development company, now has its own intro built into the game.
 
-
-
-
-<p align="center"><img src="docs/screenshots/combat.jpg" width="100%"><br><sub>Combat, running natively at 60 fps.</sub></p>
+<p align="center">
+<img src="docs/screenshots/combat.jpg" width="100%">
+<br><sub>Combat, running natively at 60 fps.</sub></p>
 
 ## What you need
 
@@ -43,7 +51,7 @@ The game's own program is translated ("recompiled") to run natively on Windows. 
 - Your own disc image of Shinobi (USA), `.iso` (or `.bin` / `.img` with raw sectors)
 - About 1.5 GB free space, plus saves
 
-Developed on a Ryzen 7 9800X3D and a GeForce RTX 5080. The CPU is the main limit.
+Developed on a Ryzen 7 9800X3D and a GeForce RTX 5080. The CPU is the main limit: more fast cores help most.
 
 ## Quick start
 
@@ -54,16 +62,35 @@ Developed on a Ryzen 7 9800X3D and a GeForce RTX 5080. The CPU is the main limit
 
 The launcher remembers where your game file is and shows it under the Game File button.
 
-<p align="center"><img src="docs/screenshots/game-file.png" width="70%"><br><sub>Game File: pick your own disc image, the launcher checks it and sets the game up for you.</sub></p>
+<p align="center">
+<img src="docs/screenshots/game-file.png" width="70%">
+<br><sub>Game File: pick your own disc image, the launcher checks it and sets the game up for you.</sub></p>
 
-Graphics are set in the launcher: resolution up to 4K, D3D11 or Vulkan, frame rate, widescreen hack, V-Sync, texture quality and sharpening.
+## New launcher (built from my own design)
 
-<p align="center"><img src="docs/screenshots/graphics-settings.png" width="40%"><br><sub>Graphics settings.</sub></p>
+- Resolution: Native, 720p, 1080p, 1440p and 4K.
+- Renderer: D3D11 or Vulkan.
+- Widescreen with 16:9, 21:9, 32:9 and Auto.
+- V-Sync, controller remapping, a Mod Menu, and fullscreen.
+- Anisotropic filtering (Texture Quality) and a working Sharpening slider.
+- Edge AA and FXAA.
+- Launcher music with a mute button, entrance animations, and credits.
+- About DLSS: not possible for this game, because DLSS needs motion data the PS2 never produced. Instead there are high internal resolutions (up to 6x), sharpening and anti-aliasing.
 
-<p align="center"><img src="docs/screenshots/resolution.png" width="40%"><br><sub>Up to 4K built-in upscaling.</sub></p>
+<p align="center">
+<img src="docs/screenshots/graphics-settings.png" width="45%"> <img src="docs/screenshots/resolution.png" width="45%">
+<br><sub>A nice range of graphical settings you can tweak. Open the launcher any time in game with F1. / Up to 4K built-in upscaling.</sub></p>
 
+## In-game
 
-<p align="center"><img src="docs/screenshots/street-run.jpg" width="100%"><br><sub>Running through the streets of post-apocalyptic Tokyo.</sub></p>
+- A pause menu on F1 or Select+Start, in the same style as the launcher. It really pauses the game, works with a controller, and has Resume, Controller, Mods and Quit.
+- Alt+Enter or F11 toggles between full screen and a proper window.
+- A Twilight Orchard intro plays at startup, and the SEGA, Overworks and ADX logos can be skipped.
+- The window's title bar shows live statistics: `FPS 60 | AVG 60 | 1% LOW 49 | CPU 4% | RAM 0.9 GB | VRAM 0.2 GB` (windowed mode). Nothing is drawn over the game.
+
+<p align="center">
+<img src="docs/screenshots/street-run.jpg" width="100%">
+<br><sub>Well optimised: about 1 GB of RAM and 0.2 GB of VRAM on standard usage. You just need a good CPU.</sub></p>
 
 ## Controls
 
@@ -79,23 +106,32 @@ Everything can be changed in **Configure Controller** (and the in-game menu, F1)
 | Camera (right stick) | I K J L |
 
 - **Mouse:** moves the camera; left click = Square, right click = Circle; **F10** switches it on and off.
-- **Controllers:** DualSense, DualSense Edge, DualShock 4 and Xbox (360, One, Series) use the standard layout. Only the DualSense Edge is tested so far.
+- **Controllers:** DualSense, DualSense Edge, DualShock 4 and Xbox (360, One, Series) use the standard layout. Only the DualSense Edge is tested so far; is a controller not working for you? Let me know.
 - **In game:** F1 or Select+Start = menu (pauses), Alt+Enter or F11 = window / full screen, F8 = mark a problem in the log.
 
+<p align="center">
+<img src="docs/screenshots/controller.png" width="70%">
+<br><sub>Full mouse, keyboard and controller support, Bluetooth or wired.</sub></p>
 
-<p align="center"><img src="docs/screenshots/controller.png" width="70%"><br><sub>Configure Controller: every button can be changed, including the camera keys.</sub></p>
+## Mod Menu
 
-## Mod Menu and statistics
+The **Mod Menu** has the studio intro, skipping the start-up logos, full screen, fast VU maths, diagnostics and more. It also has experimental effect settings (fog, glow and blur at high resolution) with switches to turn them off.
 
-The **Mod Menu** has the studio intro, skipping the start-up logos, full screen, fast VU maths, diagnostics and more.
+<p align="center">
+<img src="docs/screenshots/mod-menu.png" width="70%">
+<br><sub>A built-in Mod Menu too.</sub></p>
 
-<p align="center"><img src="docs/screenshots/mod-menu.png" width="70%"><br><sub>The Mod Menu.</sub></p>
+## Performance
 
+- Fixed a bug where 10-15% of finished frames were thrown away before reaching the screen.
+- The window no longer waits on the graphics thread every frame (about 9 ms of every 16.7).
+- Frames are shown on an even beat, and the graphics thread does less copying per frame.
+- The game's own code finishes a frame in about 6 ms of the 16.7 ms available.
+- Frame-rate choices: 30, 50, 60 or Unlocked. Fixed V-Sync "off" being ignored at startup.
 
-The window's title bar shows live statistics: `FPS 60 | AVG 60 | 1% LOW 49 | CPU 4% | RAM 0.9 GB | VRAM 0.2 GB` (windowed mode). Nothing is drawn over the game.
-
-
-<p align="center"><img src="docs/screenshots/group-fight.jpg" width="100%"><br><sub>Group fights stay smooth thanks to the CPU-heavy native build.</sub></p>
+<p align="center">
+<img src="docs/screenshots/group-fight.jpg" width="100%">
+<br><sub>Group fights stay smooth thanks to the CPU-heavy native build.</sub></p>
 
 ## Saves
 
@@ -103,19 +139,25 @@ Saves are kept in the `saves` folder next to the launcher, apart from the game f
 
 ## Sound note
 
-The game's streamed music can reach the sound chip with a damaged right channel (static in the right ear, a late copy of the sound). The cause is still being tracked down. Until then `audio.stereo_repair` in `game/settings.ini` plays the clean left channel in both ears (`copy_left`, default); sound effects stay in stereo. Set it to `stereo` to turn the repair off.
+The PCSX2 sound chip emulation is the default and fixed double-looping music and sounds that kept playing after you left a scene. The old sound code is still there as the "Legacy sound chip" option. The game's streamed music can still reach the sound chip with a damaged right channel (static in the right ear); until the cause is found, `audio.stereo_repair` in `game/settings.ini` plays the clean left channel in both ears (`copy_left`, default; Shinobi never had surround sound). Set it to `stereo` to turn the repair off.
 
-## Known issues
+## Known issues (fixes coming in v0.4)
 
-- **21:9 widescreen is experimental:** a pink square can appear when an enemy dies, and the game can crash. 4:3 and 16:9 (with or without the widescreen hack) are fine. Use 16:9 on an ultra-wide screen for now.
+- **Stage 2 has missing music; stage 3 onwards can have no sound.** To fix it: press F1, close the game, restart, and the sound returns.
+- **Pre-rendered cutscenes do not render correctly after a certain point.**
+- 21:9 onwards widescreen is experimental (a pink square when an enemy dies, and a possible crash). Use 16:9 for now.
+- The frame rate can dip in the heaviest fights. It's a CPU-heavy build.
+- The duo boss has some strange pink geometry around them.
+- Some FPS drops on some levels, nothing crazy, just needs more optimisation.
 - Pressing Escape no longer quits the game (it is Circle / cancel). Close with the window's X, Alt+F4 or the F1 menu's Quit.
-- Frame rate can dip in the heaviest fights.
-- Music is the same in both ears by default (see the sound note).
-- Screen effects (fog, glow, blur) at high resolutions are not fully checked.
-- Controllers other than the DualSense Edge are untested; the mouse buttons are guessed attack buttons.
+- Only the DualSense Edge is tested; other controllers should work.
 
+<p align="center">
+<img src="docs/screenshots/ninja-magic.jpg" width="100%">
+<br><sub>Ninja magic.</sub></p>
 
-<p align="center"><img src="docs/screenshots/ninja-magic.jpg" width="100%"><br><sub>Ninja magic.</sub></p>
+Any issues? Complain as much as you like in the Issues tab or on Reddit, I read everything. Next up: version 0.4, then Nightshade or Tekken 4.
+
 
 ## Building from source
 

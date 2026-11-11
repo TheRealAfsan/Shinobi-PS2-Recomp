@@ -1,0 +1,133 @@
+{
+  "$schema": "https://recomplauncher.com/schema/recomplauncher.json",
+  "format": 1,
+  "name": "Shinobi (PS2) Recomp",
+  "repo": "TheRealAfsan/Shinobi-PS2-Recomp",
+  "game": {
+    "kind": "iso",
+    "label": "Your disc image (.iso) of Shinobi for PlayStation 2, USA release, serial SLUS-20459.",
+    "check": { "iso9660": "SLUS_204.59" }
+  },
+  "prepare": {
+    "program": ["Shinobi Launcher.exe"],
+    "args": ["--prepare", "--game", "{game}"],
+    "label": "The game's files from your disc (about 1.2 GB)",
+    "timeout": 900
+  },
+  "start": {
+    "program": ["Shinobi Launcher.exe"],
+    "args": ["--play"]
+  },
+  "saves": ["{install}/saves"],
+  "folders": {
+    "saves": [{ "path": "{install}/saves" }],
+    "logs": [{ "path": "{install}/game/captures" }]
+  },
+  "config": [
+    {
+      "id": "main",
+      "format": "ini",
+      "file": [{ "path": "{install}/game/settings.ini" }],
+      "new": {
+        "video/renderer": "pcsx2",
+        "video/render_scale": "3",
+        "video/pcsx2_renderer": "d3d11",
+        "video/fps_target": "60",
+        "video/aspect": "16:9",
+        "video/vsync": "true",
+        "video/anisotropic": "2",
+        "video/sharpening": "20",
+        "video/antialias": "false",
+        "video/edge_aa": "false",
+        "audio/stereo_repair": "copy_left",
+        "saves/memcard_folder": "../saves/mc0"
+      }
+    }
+  ],
+  "settings": [
+    {
+      "id": "resolution", "label": "Resolution",
+      "help": "What the game draws at. Native is the PS2's own; higher needs a faster graphics card.",
+      "choices": [
+        { "label": "Native", "set": { "video/render_scale": "1" } },
+        { "label": "720p", "set": { "video/render_scale": "2" } },
+        { "label": "1080p", "set": { "video/render_scale": "3" } },
+        { "label": "1440p", "set": { "video/render_scale": "4" } },
+        { "label": "4K", "set": { "video/render_scale": "6" } }
+      ],
+      "defaults": { "video/render_scale": "3" }
+    },
+    {
+      "id": "renderer", "label": "Renderer",
+      "help": "D3D11 works on every PC. Try Vulkan if D3D11 gives you trouble.",
+      "choices": [
+        { "label": "D3D11", "set": { "video/pcsx2_renderer": "d3d11" } },
+        { "label": "Vulkan", "set": { "video/pcsx2_renderer": "vulkan" } }
+      ],
+      "defaults": { "video/pcsx2_renderer": "d3d11" }
+    },
+    {
+      "id": "frame_rate", "label": "Frame rate",
+      "help": "The game is made for 60. Unlocked runs as fast as your PC can and may speed parts of the game up.",
+      "choices": [
+        { "label": "60", "set": { "video/fps_target": "60" } },
+        { "label": "50", "set": { "video/fps_target": "50" } },
+        { "label": "30", "set": { "video/fps_target": "30" } },
+        { "label": "Unlocked", "set": { "video/fps_target": "unlocked" } }
+      ],
+      "defaults": { "video/fps_target": "60" }
+    },
+    {
+      "id": "aspect", "label": "Widescreen",
+      "help": "16:9 is recommended. 21:9 and wider are experimental and can crash.",
+      "choices": [
+        { "label": "16:9", "set": { "video/aspect": "16:9" } },
+        { "label": "Off (4:3)", "set": { "video/aspect": "4:3" } },
+        { "label": "21:9", "set": { "video/aspect": "21:9" } },
+        { "label": "32:9", "set": { "video/aspect": "32:9" } },
+        { "label": "Auto", "set": { "video/aspect": "auto" } }
+      ],
+      "defaults": { "video/aspect": "16:9" }
+    },
+    {
+      "id": "vsync", "label": "V-Sync",
+      "help": "Stops tearing. Turn off only on a variable-refresh screen.",
+      "choices": [
+        { "label": "On", "set": { "video/vsync": "true" } },
+        { "label": "Off", "set": { "video/vsync": "false" } }
+      ],
+      "defaults": { "video/vsync": "true" }
+    },
+    {
+      "id": "textures", "label": "Texture quality",
+      "help": "Anisotropic filtering: keeps floors and walls sharp at an angle.",
+      "choices": [
+        { "label": "Off", "set": { "video/anisotropic": "off" } },
+        { "label": "2x", "set": { "video/anisotropic": "2" } },
+        { "label": "4x", "set": { "video/anisotropic": "4" } },
+        { "label": "8x", "set": { "video/anisotropic": "8" } },
+        { "label": "16x", "set": { "video/anisotropic": "16" } }
+      ],
+      "defaults": { "video/anisotropic": "2" }
+    },
+    {
+      "id": "antialiasing", "label": "Anti-aliasing",
+      "help": "Smooths jagged edges. Edge AA is the sharper of the two.",
+      "choices": [
+        { "label": "Off", "set": { "video/antialias": "false", "video/edge_aa": "false" } },
+        { "label": "FXAA", "set": { "video/antialias": "true", "video/edge_aa": "false" } },
+        { "label": "Edge AA", "set": { "video/antialias": "false", "video/edge_aa": "true" } }
+      ],
+      "defaults": { "video/antialias": "false", "video/edge_aa": "false" }
+    },
+    {
+      "id": "window", "label": "Window",
+      "help": "Alt+Enter or F11 also switches in game.",
+      "choices": [
+        { "label": "Windowed", "set": { "video/window": "windowed" } },
+        { "label": "Fullscreen", "set": { "video/window": "borderless" } }
+      ],
+      "defaults": { "video/window": "windowed" }
+    }
+  ]
+}

@@ -315,6 +315,13 @@ namespace
 
     bool startGame(std::string &error)
     {
+        // The game program is built with AVX2. On a CPU without it Windows would close the game at once with no message.
+        if (!IsProcessorFeaturePresent(40 /* PF_AVX2_INSTRUCTIONS_AVAILABLE */))
+        {
+            error = "This PC's processor does not support AVX2, which the game needs. It runs on Intel Core 4th generation "
+                    "(2013) or newer and on AMD Ryzen. Celeron, Pentium and Atom processors usually do not have it.";
+            return false;
+        }
         if (!gameInstalled())
         {
             error = "The game's files are not set up yet. Open Game File, choose your Shinobi (USA) disc image and press Set up.";
@@ -338,7 +345,8 @@ namespace
                                     {"PS2X_SPU2_TRACE", "1"},
                                     {"PS2X_FRAME_TIMELINE", "1"},
                                     {"PS2X_ADX_CHECK", "1"},
-                                    {"PS2X_IOP_WATCH", "1"}};
+                                    {"PS2X_IOP_WATCH", "1"},
+                                    {"PS2X_IOP_PC_STATS", "1"}}; // [iop-pc]: where the sound processor's time goes
             for (const auto &e : env)
                 SetEnvironmentVariableA(e[0], e[1]);
         }

@@ -39,6 +39,8 @@ Shinobi (PlayStation 2, USA) - the disc you own, made into an image file.
 ------------------------------------------------------------------------------
 
   - Windows 10 or 11, 64-bit.
+  - A processor with AVX2: Intel Core 4th generation (2013) or newer, or AMD
+    Ryzen. Celeron, Pentium and Atom chips usually do not have it.
   - A graphics card that supports Direct3D 11 (default) or Vulkan.
   - Microsoft Edge WebView2 Runtime for the launcher (already part of
     Windows 11; Windows 10 users can get it free from microsoft.com).

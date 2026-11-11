@@ -47,6 +47,7 @@ The game's own program is translated ("recompiled") to run natively on Windows. 
 ## What you need
 
 - Windows 10 or 11, 64-bit
+- A processor with AVX2: Intel Core 4th generation (2013) or newer, or AMD Ryzen. Celeron, Pentium and Atom chips usually do not have it, and the launcher will tell you
 - A graphics card with Direct3D 11 (default) or Vulkan
 - Microsoft Edge WebView2 Runtime (part of Windows 11)
 - The Microsoft Visual C++ Redistributable (x64), which most PCs already have

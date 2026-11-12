@@ -32,6 +32,11 @@
 #include "WebView2EnvironmentOptions.h"
 #endif
 
+namespace ps2x::pcsx2gs
+{
+    void applyLiveSettings(); // gs_pcsx2.cpp
+}
+
 namespace fs = std::filesystem;
 
 namespace ps2x::ingame
@@ -53,6 +58,7 @@ namespace ps2x::ingame
         State g_state = State::Idle;
         bool g_open = false;
         bool g_wantOpen = false; // asked to open while still creating
+        bool g_manualMode = false; // LOCAL PATCH: opened with F4: the game manual only
         HWND g_parent = nullptr;
         ComPtr<ICoreWebView2Controller> g_controller;
         ComPtr<ICoreWebView2> g_view;
@@ -112,7 +118,7 @@ namespace ps2x::ingame
         {
             std::ostringstream js;
             js << "window.__launcherInit={" << launcher::pageValues(settingGet(), false)
-               << ",music:null,muted:true,ingame:true,restart:" << (ps2x::settings::restartNeeded() ? "true" : "false") << "};";
+               << ",music:null,muted:true,ingame:true,manualOnly:" << (g_manualMode ? "true" : "false") << ",restart:" << (ps2x::settings::restartNeeded() ? "true" : "false") << "};";
             return js.str();
         }
 
@@ -129,6 +135,8 @@ namespace ps2x::ingame
             { ps2x::settings::set(section, key, value); };
             launcher::applyPageValues(values, settingGet(), set);
             ps2x::settings::save();
+            // LOCAL PATCH: resolution, filtering, edge AA and blending go to the running renderer straight away.
+            ps2x::pcsx2gs::applyLiveSettings();
             return ps2x::settings::restartNeeded();
         }
 
@@ -155,6 +163,30 @@ namespace ps2x::ingame
             }
             else if (command == "quit")
                 g_request = Request::Quit;
+            else if (command == "manual")
+            {
+                // LOCAL PATCH: the manual's pages as the launcher prepared them (game/manual/page_NNN.png).
+                std::error_code ec;
+                const fs::path folder = fs::current_path(ec) / "manual";
+                unsigned pages = 0;
+                char name[32];
+                for (;;)
+                {
+                    std::snprintf(name, sizeof(name), "page_%03u.png", pages + 1u);
+                    if (!fs::exists(folder / name, ec))
+                        break;
+                    ++pages;
+                }
+                if (pages == 0)
+                    post(L"manual-error:Open the manual once in the launcher (Manual button) and it will be here too.");
+                else
+                {
+                    const auto stamp = fs::last_write_time(folder / "page_001.png", ec).time_since_epoch().count();
+                    post((L"manual:" + std::to_wstring(pages) + L"|" + fileUrl(folder / "page_") + L"|" +
+                          std::to_wstring(static_cast<long long>(stamp % 1000000007LL)))
+                             .c_str());
+                }
+            }
             else if (command == "openfolder")
             {
                 std::error_code ec;
@@ -293,7 +325,31 @@ namespace ps2x::ingame
         }
     }
 
+    void openImpl(void *window);
+
     void open(void *window)
+    {
+        if (g_open)
+            return;
+        g_manualMode = false;
+        openImpl(window);
+    }
+
+    // LOCAL PATCH: F4: the manual alone, rising from the bottom; F4 again slides it down and the game resumes.
+    void toggleManual(void *window)
+    {
+        if (g_open && g_manualMode)
+        {
+            post(L"manualhide"); // the page slides it away, then asks to resume
+            return;
+        }
+        if (g_open)
+            close();
+        g_manualMode = true;
+        openImpl(window);
+    }
+
+    void openImpl(void *window)
     {
         if (g_open)
             return;
@@ -337,6 +393,13 @@ namespace ps2x::ingame
         layout();
     }
 
+    void padEvent(const char *name)
+    {
+        if (!g_open || !name)
+            return;
+        post((L"pad:" + widen(name)).c_str());
+    }
+
     Request takeRequest()
     {
         const Request request = g_request;
@@ -370,6 +433,8 @@ namespace ps2x::ingame
     void close() {}
     bool isOpen() { return false; }
     void update(void *) {}
+    void padEvent(const char *) {}
+    void toggleManual(void *) {}
     Request takeRequest() { return Request::None; }
     bool relaunchGame() { return false; }
 #endif

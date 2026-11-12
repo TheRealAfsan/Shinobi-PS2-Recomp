@@ -28,6 +28,8 @@
 #include <chrono>
 #include <atomic>
 #include <cstdio>
+#include <cmath>
+#include <mutex>
 #include <filesystem>
 #include <ctime>
 #include <system_error>
@@ -652,12 +654,25 @@ extern "C" __declspec(dllimport) int __stdcall GetSystemMetrics(int index);
 // monitor's own shape). ps2xWidescreenShape() is the picture's width / height; ps2xWidescreenFactor() the horizontal
 // camera scale Shinobi's AdjustDisplayGameAspect passes to HyScreen::SetAspect (1.0 on the PS2; PCSX2's 16:9 patch by
 // nemesis2000 puts 0.75 there, i.e. (4/3) / (16/9)).
+// The shape follows the setting while the game runs (the F1 menu can change it): worked out again only when the settings
+// change. ps2xWidescreenVsync (below) then has the game widen its camera again.
+static std::mutex g_widescreenMutex;
+static uint64_t g_widescreenVersion = 0;
+static double g_widescreenShapeValue = 4.0 / 3.0;
+
 double ps2xWidescreenShape()
 {
-    static const double s_shape = []() -> double
+    const uint64_t version = ps2x::settings::version();
+    std::lock_guard<std::mutex> lock(g_widescreenMutex);
+    if (g_widescreenVersion == version)
+        return g_widescreenShapeValue;
+    g_widescreenVersion = version;
+    static std::string s_lastAspect = "-";
+    g_widescreenShapeValue = [&]() -> double
     {
-        const char *value = std::getenv("PS2X_WIDESCREEN");
-        const std::string aspect = value ? value : "";
+        const std::string aspect = ps2x::settings::get("video", "aspect");
+        const bool changed = aspect != s_lastAspect;
+        s_lastAspect = aspect;
         double shape = 4.0 / 3.0;
         if (aspect == "16:9")
             shape = 16.0 / 9.0;
@@ -674,18 +689,115 @@ double ps2xWidescreenShape()
 #endif
         }
         shape = std::max(shape, 4.0 / 3.0);
-        if (aspect == "16:9" || aspect == "21:9" || aspect == "32:9" || aspect == "auto")
+        if (changed)
             std::fprintf(stderr, "[widescreen] %s: picture %.3f:1, camera width x%.3f\n", aspect.c_str(), shape,
                          shape / (4.0 / 3.0));
         return shape;
     }();
-    return s_shape;
+    return g_widescreenShapeValue;
 }
+
+// The HyScreen the game last widened (AdjustDisplayGameAspect runs when a stage starts) and the factor it got.
+static std::atomic<uint32_t> g_widescreenScreen{0};
+static std::atomic<uint32_t> g_widescreenGp{0};
+static std::atomic<float> g_widescreenApplied{0.0f};
+static std::atomic<bool> g_widescreenQueued{false};
 
 float ps2xWidescreenFactor()
 {
     return static_cast<float>((4.0 / 3.0) / ps2xWidescreenShape());
 }
+
+// Called from AdjustDisplayGameAspect with its HyScreen ($a0) and $gp, with the factor it is about to use.
+void ps2xWidescreenNoteScreen(uint32_t screen, uint32_t gp, float factor)
+{
+    g_widescreenScreen.store(screen, std::memory_order_relaxed);
+    g_widescreenGp.store(gp, std::memory_order_relaxed);
+    g_widescreenApplied.store(factor, std::memory_order_relaxed);
+    g_widescreenQueued.store(false, std::memory_order_relaxed);
+}
+
+// Every vsync (EE scheduler thread): when the aspect setting was changed in the F1 menu, run the game's own
+// AdjustDisplayGameAspect(screen) again, so the camera widens or narrows straight away instead of at the next stage.
+void ps2xWidescreenVsync(PS2Runtime &runtime)
+{
+    const uint32_t screen = g_widescreenScreen.load(std::memory_order_relaxed);
+    if (!screen || g_widescreenQueued.load(std::memory_order_relaxed))
+        return;
+    const float factor = ps2xWidescreenFactor();
+    if (std::fabs(factor - g_widescreenApplied.load(std::memory_order_relaxed)) < 1e-4f)
+        return;
+    constexpr uint32_t kAdjustDisplayGameAspect = 0x234A50u;
+    if (!runtime.hasFunction(kAdjustDisplayGameAspect))
+        return;
+    g_widescreenQueued.store(true, std::memory_order_relaxed);
+    GuestInvocation call{};
+    call.kind = GuestInvocationKind::HleCall;
+    call.context.pc = kAdjustDisplayGameAspect;
+    SET_GPR_U32(&call.context, 4, screen);
+    SET_GPR_U32(&call.context, 28, g_widescreenGp.load(std::memory_order_relaxed));
+    SET_GPR_U32(&call.context, 29, 0u);
+    SET_GPR_U32(&call.context, 31, 0u);
+    runtime.eeScheduler().queueInvocation(std::move(call));
+    std::fprintf(stderr, "[widescreen] camera re-widened while playing: x%.3f\n", 1.0 / factor);
+}
+
+// LOCAL PATCH: the hotkey notice (F2, F3): "Performance overlay: On" in the top-right corner. It slides down, stays
+// two seconds and slides back up; a new press replaces it. Drawn by the window thread, over the game.
+static std::string g_toastName;
+static bool g_toastOn = false;
+static double g_toastStart = -100.0;
+
+static void ps2xHotkeyToast(const char *name, bool on)
+{
+    g_toastName = name;
+    g_toastOn = on;
+    g_toastStart = GetTime();
+}
+
+static void ps2xDrawHotkeyToast()
+{
+    constexpr double kIn = 0.22, kHold = 2.0, kOut = 0.22;
+    const double t = GetTime() - g_toastStart;
+    if (t < 0.0 || t > kIn + kHold + kOut || g_toastName.empty())
+        return;
+    // How far down it is: 0 hidden above the screen, 1 in place (ease out on the way in, ease in on the way out).
+    double show = 1.0;
+    if (t < kIn)
+    {
+        const double x = t / kIn;
+        show = 1.0 - (1.0 - x) * (1.0 - x) * (1.0 - x);
+    }
+    else if (t > kIn + kHold)
+    {
+        const double x = (t - kIn - kHold) / kOut;
+        show = 1.0 - x * x * x;
+    }
+    const int size = std::max(18, GetScreenHeight() / 48);
+    const std::string state = g_toastOn ? "On" : "Off";
+    const std::string text = g_toastName + ":  ";
+    const int textW = MeasureText(text.c_str(), size), stateW = MeasureText(state.c_str(), size);
+    const int padX = size, padY = size * 2 / 3, bar = std::max(4, size / 5), margin = 16;
+    const int w = bar + padX + textW + stateW + padX, h = size + 2 * padY;
+    const int x = GetScreenWidth() - margin - w;
+    const int y = static_cast<int>(-h + (h + margin) * show);
+    const Color accent = g_toastOn ? Color{60, 255, 110, 255} : Color{150, 150, 160, 255};
+    DrawRectangleRounded(Rectangle{static_cast<float>(x), static_cast<float>(y), static_cast<float>(w), static_cast<float>(h)},
+                         0.25f, 8, Color{12, 12, 16, 210});
+    DrawRectangle(x, y + h / 5, bar, h - 2 * (h / 5), accent);
+    DrawText(text.c_str(), x + bar + padX, y + padY, size, Color{235, 235, 240, 255});
+    DrawText(state.c_str(), x + bar + padX + textW, y + padY, size, accent);
+}
+
+// LOCAL PATCH (DualSense): src/lib/ps2_dualsense.cpp (the same struct as in ps2_pad.cpp).
+struct Ps2xDualSenseInput
+{
+    uint8_t lx, ly, rx, ry;
+    uint8_t l2, r2;
+    uint8_t hat;
+    bool square, cross, circle, triangle, l1, r1, l2Button, r2Button, create, options, l3, r3, ps;
+};
+bool ps2xDualSenseRead(Ps2xDualSenseInput &out);
 
 // LOCAL PATCH: one clock for the perf CSV's time_s and the F12 marks, so a mark can be found in the CSV.
 // The statistics text of the window title (written by the presentation's drawFps, read by the title update).
@@ -700,10 +812,42 @@ static double RunSeconds()
 static float s_lastSecondWorstMs = 0.0f; // slowest frame gap of the last full second (title bar, F12 marks)
 static double s_lastSecondGameFps = 0.0;
 
+namespace ps2x::pcsx2gs
+{
+    uint64_t bytesSubmitted();
+    bool startCapture(double seconds);
+    void frameStats(uint64_t &produced, uint64_t &dropped, uint64_t &waiting);
+}
+extern std::atomic<uint64_t> g_ps2SwapCount;
+
 // A presented frame: `isNew` when its picture differs from the previous one.
 static void PerfNoteFrame(bool isNew, uint64_t tick)
 {
     PerfRecorder &p = s_perf;
+    // LOCAL PATCH (freeze report): when the picture has not changed for 80 ms or more, say what went on meanwhile: the
+    // game's own buffer swaps, the drawing it sent and the pictures the renderer made. Swaps and drawing going on with an
+    // unchanged picture = the game drew the same frame (a pause in the game itself); no swaps = the game stopped; swaps
+    // and drawing but no new renderer pictures = the renderer held the picture.
+    static uint64_t s_swapsAtNew = 0u, s_bytesAtNew = 0u, s_producedAtNew = 0u;
+    if (isNew)
+    {
+        const uint64_t swaps = g_ps2SwapCount.load(std::memory_order_relaxed);
+        const uint64_t bytes = ps2x::pcsx2gs::bytesSubmitted();
+        uint64_t produced = 0u, dropped = 0u, waiting = 0u;
+        ps2x::pcsx2gs::frameStats(produced, dropped, waiting);
+        if (p.haveLastNew)
+        {
+            const double heldMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - p.lastNewTime).count();
+            if (heldMs >= 80.0)
+                std::fprintf(stderr, "[freeze] t=%.1f picture held %.0f ms | game swaps meanwhile %llu | drawing sent %.1f MB | renderer pictures %llu\n",
+                             RunSeconds(), heldMs, static_cast<unsigned long long>(swaps - s_swapsAtNew),
+                             static_cast<double>(bytes - s_bytesAtNew) / 1048576.0,
+                             static_cast<unsigned long long>(produced - s_producedAtNew));
+        }
+        s_swapsAtNew = swaps;
+        s_bytesAtNew = bytes;
+        s_producedAtNew = produced;
+    }
     if (!isNew)
     {
         ++p.repeats;
@@ -1172,6 +1316,13 @@ static void PollMarkHotkey(uint64_t currentTick)
     (void)padDown;
     const bool padPressed = padDown && !s_padWasDown;
     s_padWasDown = padDown;
+    // LOCAL PATCH: F7 records graphics memory and the next 15 seconds of drawing (gs_pcsx2.cpp startCapture), for an
+    // effect that draws wrong. Runs on its own thread: the copy waits for the GS thread.
+    if (IsKeyPressed(KEY_F7))
+    {
+        std::fprintf(stderr, "[capture] F7 at t=%.1f\n", RunSeconds());
+        std::thread([]() { ps2x::pcsx2gs::startCapture(15.0); }).detach();
+    }
     if (!IsKeyPressed(KEY_F8) && !padPressed)
         return;
     extern std::atomic<uint64_t> g_ps2AudioPlayedFrames;
@@ -1616,6 +1767,16 @@ PS2Runtime::PS2Runtime()
 {
     m_iopHost = std::make_unique<PS2IopHostAdapter>(*this);
     m_iopSubsystem = std::make_unique<ps2x::iop::IopSubsystem>(*m_iopHost);
+    {
+        // LOCAL PATCH (frame pacing): the IOP emulator runs inline on the game's CPU thread. Run it in batches of 2048 IOP
+        // cycles (was 128: the scheduler overhead per batch cost as much as the emulated code), and once it has used
+        // 1.5 ms of a stretch of game work, leave the rest (at most 4 ms of IOP time) for the moment the game's CPU waits
+        // for the next vblank, so a burst of sound work no longer pushes a frame past its deadline. Emulated time and the
+        // order of events are unchanged. PS2X_IOP_DEFER=0 restores the old behaviour.
+        const char *defer = std::getenv("PS2X_IOP_DEFER");
+        if (!(defer && defer[0] == '0'))
+            m_iopSubsystem->setDeferral(2048u, 1500000u, 147456u);
+    }
 
     m_eeScheduler = std::make_unique<EeScheduler>(*this);
 
@@ -1758,7 +1919,19 @@ void PS2Runtime::advanceIopEeCycles(uint64_t eeCycles) noexcept
 {
     // This is called up to millions of times a second: two clock reads per call cost 100+ ms of every second on the game's
     // CPU thread (the timer measured more than the thing it timed). Time one call in 32 and count it 32 times.
+    static const bool s_deferred = []() { const char *e = std::getenv("PS2X_IOP_DEFER"); return !(e && e[0] == '0'); }();
     static thread_local uint32_t s_calls = 0u;
+    if (s_deferred)
+    {
+        // The emulator times its own (now far fewer) runs; publish its total now and then for the [wait] line.
+        m_iopSubsystem->runEeCycles(eeCycles);
+        if ((++s_calls & 255u) == 0u)
+        {
+            g_ps2IopCalls.fetch_add(256u, std::memory_order_relaxed);
+            g_ps2IopNs.store(ps2x::iop::IopSubsystem::runNanoseconds(), std::memory_order_relaxed);
+        }
+        return;
+    }
     g_ps2IopCalls.fetch_add(1u, std::memory_order_relaxed);
     if ((++s_calls & 31u) != 0u)
     {
@@ -1770,6 +1943,12 @@ void PS2Runtime::advanceIopEeCycles(uint64_t eeCycles) noexcept
     g_ps2IopNs.fetch_add(32u * static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                                          std::chrono::steady_clock::now() - start).count()),
                          std::memory_order_relaxed);
+}
+
+void PS2Runtime::iopIdlePoint() noexcept
+{
+    if (m_iopSubsystem)
+        m_iopSubsystem->idleFlush();
 }
 
 void PS2Runtime::resetIop()
@@ -3770,6 +3949,7 @@ void main()
         uint64_t statFrames = 0, avgFrames0 = 0;
         double statTime = 0.0, avgTime0 = 0.0, sysTime = 0.0;
         int cpuPercent = -1;
+        int gpuPercent = -1;
         float ramGb = -1.0f, vramGb = -1.0f;
 
         void apply(Texture2D &frameTex)
@@ -3975,7 +4155,11 @@ void main()
                     std::sscanf(text.c_str() + at, "| RAM %f", &ram);
                 if (const size_t at = text.find("| VRAM "); at != std::string::npos)
                     std::sscanf(text.c_str() + at, "| VRAM %f", &vram);
+                int gpu = -1;
+                if (const size_t at = text.find("| GPU "); at != std::string::npos)
+                    std::sscanf(text.c_str() + at, "| GPU %d", &gpu);
                 cpuPercent = cpu;
+                gpuPercent = gpu;
                 ramGb = ram;
                 vramGb = vram;
             }
@@ -4002,6 +4186,46 @@ void main()
             {
                 std::lock_guard<std::mutex> lock(g_ps2StatsTitleMutex);
                 g_ps2StatsTitle = line;
+            }
+            // LOCAL PATCH: the performance overlay ([performance] stats_overlay, the launcher's Display tab): four short
+            // lines in the top-left corner of the screen, bright green on a faint see-through backing.
+            static uint64_t s_ovlVersion = 0;
+            static bool s_ovlOn = false;
+            if (const uint64_t v = ps2x::settings::version(); v != s_ovlVersion)
+            {
+                s_ovlVersion = v;
+                s_ovlOn = ps2x::settings::getBool("performance", "stats_overlay");
+            }
+            if (s_ovlOn)
+            {
+                const auto gb = [](float v) {
+                    char b[16];
+                    if (v < 0.0f)
+                        return std::string("--");
+                    std::snprintf(b, sizeof(b), "%.1f GB", v);
+                    return std::string(b);
+                };
+                const auto pct = [](int v) { return v >= 0 ? std::to_string(v) + "%" : std::string("--"); };
+                char l1[64], l2[64], l3[64], l4[64];
+                std::snprintf(l1, sizeof(l1), "FPS %.0f   %.1f ms", fps, fps > 0.5f ? 1000.0f / fps : 0.0f);
+                std::snprintf(l2, sizeof(l2), "AVG %s   1%% LOW %s",
+                              avg > 0.0 ? std::to_string(static_cast<int>(avg + 0.5)).c_str() : "--",
+                              low > 0.0f ? std::to_string(static_cast<int>(low + 0.5f)).c_str() : "--");
+                std::snprintf(l3, sizeof(l3), "CPU %s   GPU %s", pct(cpuPercent).c_str(), pct(gpuPercent).c_str());
+                std::snprintf(l4, sizeof(l4), "RAM %s   VRAM %s", gb(ramGb).c_str(), gb(vramGb).c_str());
+                const char *lines[] = {l1, l2, l3, l4};
+                const int size = std::max(16, GetScreenHeight() / 54);
+                const int pad = size / 2, gap = size / 4, x = 12, y = 12;
+                int width = 0;
+                for (const char *l : lines)
+                    width = std::max(width, MeasureText(l, size));
+                const int height = 4 * size + 3 * gap;
+                DrawRectangleRounded(Rectangle{static_cast<float>(x), static_cast<float>(y), static_cast<float>(width + 2 * pad),
+                                               static_cast<float>(height + 2 * pad)},
+                                     0.18f, 6, Color{0, 0, 0, 90});
+                const Color green{60, 255, 110, 235};
+                for (int i = 0; i < 4; ++i)
+                    DrawText(lines[i], x + pad, y + pad + i * (size + gap), size, green);
             }
         }
     };
@@ -4195,6 +4419,40 @@ void PS2Runtime::run()
         UploadFrame(frameTex, this, presentWidth, presentHeight);
 
         presentation.apply(frameTex);
+        {
+            // LOCAL PATCH (haptics research, temporary): a small copy of every presented frame for the frame recorder
+            // (ps2_haptics_trace.cpp), tagged with the game frame, so the picture lines up with the haptics trace.
+            extern int ps2xHapticVideoWidth();
+            extern int ps2xHapticVideoHeight();
+            extern void ps2xHapticVideoFrame(const uint8_t *rgba);
+            static RenderTexture2D s_small{};
+            static bool s_smallReady = false;
+            // Developers only: PS2X_HAPTIC_VIDEO=1 (it writes about 10 MB a second); off in normal play.
+            static const bool s_record = std::getenv("PS2X_HAPTIC_VIDEO") != nullptr;
+            if (!s_record)
+                s_smallReady = true;
+            else if (!s_smallReady)
+            {
+                s_small = LoadRenderTexture(ps2xHapticVideoWidth(), ps2xHapticVideoHeight());
+                s_smallReady = true;
+            }
+            if (s_small.id != 0)
+            {
+                BeginTextureMode(s_small);
+                ClearBackground(BLACK);
+                DrawTexturePro(frameTex,
+                               Rectangle{0.0f, 0.0f, static_cast<float>(std::max<uint32_t>(1u, presentWidth)),
+                                         static_cast<float>(std::max<uint32_t>(1u, presentHeight))},
+                               Rectangle{0.0f, 0.0f, static_cast<float>(ps2xHapticVideoWidth()),
+                                         static_cast<float>(ps2xHapticVideoHeight())},
+                               Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+                EndTextureMode();
+                Image small = LoadImageFromTexture(s_small.texture);
+                if (small.data && small.format == PIXELFORMAT_UNCOMPRESSED_R8G8B8A8)
+                    ps2xHapticVideoFrame(static_cast<const uint8_t *>(small.data));
+                UnloadImage(small);
+            }
+        }
         BeginDrawing();
         ClearBackground(BLACK);
         const float srcWidth = static_cast<float>(std::max<uint32_t>(1u, presentWidth));
@@ -4227,6 +4485,7 @@ void PS2Runtime::run()
             dstHeight};
         presentation.drawFrame(frameTex, srcRect, dstRect);
         presentation.drawFps(dstRect);
+        ps2xDrawHotkeyToast();
         if (ps2x::ingame::isOpen()) // the game dimmed behind the in-game menu
             DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), Fade(BLACK, 0.6f));
         if (m_debugUiInitialized && m_debugUiDrawCallback)
@@ -4239,6 +4498,22 @@ void PS2Runtime::run()
         // resizable window, at any time (presentation.apply does the switch next frame). In a window the usual minimise /
         // maximise / resize work. Not saved to the file unless the F1 menu saves. Alt+Enter never reaches the game as Start
         // (ps2_pad.cpp).
+        // LOCAL PATCH: F3 switches the close-up camera (eases in / out, ps2_close_camera.cpp; saved).
+        if (IsKeyPressed(KEY_F3))
+        {
+            const bool on = !ps2x::settings::getBool("game", "close_camera");
+            ps2x::settings::set("game", "close_camera", on ? "true" : "false");
+            ps2x::settings::save();
+            ps2xHotkeyToast("Close-up camera", on);
+        }
+        // LOCAL PATCH: F2 shows / hides the performance overlay at any time (saved, so it stays as left).
+        if (IsKeyPressed(KEY_F2) && !IsKeyDown(KEY_LEFT_SHIFT) && !IsKeyDown(KEY_RIGHT_SHIFT))
+        {
+            const bool on = !ps2x::settings::getBool("performance", "stats_overlay");
+            ps2x::settings::set("performance", "stats_overlay", on ? "true" : "false");
+            ps2x::settings::save();
+            ps2xHotkeyToast("Performance overlay", on);
+        }
         {
             static std::string s_fullMode = "borderless";
             const bool alt = IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT);
@@ -4274,6 +4549,9 @@ void PS2Runtime::run()
             }
             else if (combo && !ps2x::ingame::isOpen())
                 ps2x::ingame::open(hwnd);
+            // LOCAL PATCH: F4: the game manual (slides up; F4 again slides it down and the game resumes).
+            if (IsKeyPressed(KEY_F4) && !IsKeyDown(KEY_LEFT_ALT) && !IsKeyDown(KEY_RIGHT_ALT))
+                ps2x::ingame::toggleManual(hwnd);
             // LOCAL PATCH: mouse camera. While the window has the focus and the F1 menu is shut, the pointer is captured and
             // its movement becomes the pad's right stick (Pad.cpp adds it to I J K L). F10 switches it on and off; the
             // [input] mouse_look and mouse_sensitivity settings are the defaults.
@@ -4354,6 +4632,84 @@ void PS2Runtime::run()
                             std::fprintf(stderr, "[freeze]   event flag %d: bits 0x%x, %u waiting\n", flag.id, flag.bits, flag.waiters);
                 }
             }
+            // LOCAL PATCH: while the F1 menu is open, the controller drives it from here (every connected pad through raylib,
+            // and the DualSense read directly), and the game gets nothing (settings::inputBlocked). Held directions repeat.
+            static bool s_wasOpen = false;
+            if (ps2x::ingame::isOpen())
+            {
+                struct Held
+                {
+                    bool down = false;
+                    double next = 0.0;
+                };
+                static Held s_held[9];
+                static const char *kNames[9] = {"up", "down", "left", "right", "cross", "circle", "l1", "r1", "start"};
+                bool now[9] = {};
+                for (int pad = 0; pad < 8; ++pad)
+                {
+                    if (!IsGamepadAvailable(pad))
+                        continue;
+                    const float ax = GetGamepadAxisMovement(pad, GAMEPAD_AXIS_LEFT_X);
+                    const float ay = GetGamepadAxisMovement(pad, GAMEPAD_AXIS_LEFT_Y);
+                    now[0] |= IsGamepadButtonDown(pad, GAMEPAD_BUTTON_LEFT_FACE_UP) || ay < -0.6f;
+                    now[1] |= IsGamepadButtonDown(pad, GAMEPAD_BUTTON_LEFT_FACE_DOWN) || ay > 0.6f;
+                    now[2] |= IsGamepadButtonDown(pad, GAMEPAD_BUTTON_LEFT_FACE_LEFT) || ax < -0.6f;
+                    now[3] |= IsGamepadButtonDown(pad, GAMEPAD_BUTTON_LEFT_FACE_RIGHT) || ax > 0.6f;
+                    now[4] |= IsGamepadButtonDown(pad, GAMEPAD_BUTTON_RIGHT_FACE_DOWN);
+                    now[5] |= IsGamepadButtonDown(pad, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT);
+                    now[6] |= IsGamepadButtonDown(pad, GAMEPAD_BUTTON_LEFT_TRIGGER_1);
+                    now[7] |= IsGamepadButtonDown(pad, GAMEPAD_BUTTON_RIGHT_TRIGGER_1);
+                    now[8] |= IsGamepadButtonDown(pad, GAMEPAD_BUTTON_MIDDLE_RIGHT);
+                }
+                {
+                    Ps2xDualSenseInput ds{};
+                    if (::ps2xDualSenseRead(ds))
+                    {
+                        const float dx = (ds.lx - 127.5f) / 127.5f, dy = (ds.ly - 127.5f) / 127.5f;
+                        now[0] |= ds.hat == 7 || ds.hat == 0 || ds.hat == 1 || dy < -0.6f;
+                        now[1] |= (ds.hat >= 3 && ds.hat <= 5) || dy > 0.6f;
+                        now[2] |= (ds.hat >= 5 && ds.hat <= 7) || dx < -0.6f;
+                        now[3] |= (ds.hat >= 1 && ds.hat <= 3) || dx > 0.6f;
+                        now[4] |= ds.cross;
+                        now[5] |= ds.circle;
+                        now[6] |= ds.l1;
+                        now[7] |= ds.r1;
+                        now[8] |= ds.options;
+                    }
+                }
+                const double t = GetTime();
+                for (int i = 0; i < 9; ++i)
+                {
+                    Held &h = s_held[i];
+                    if (!s_wasOpen)
+                    {
+                        // Buttons already held when the menu opened (Select+Start) count only after a release.
+                        h.down = now[i];
+                        h.next = 1e30;
+                        continue;
+                    }
+                    if (!now[i])
+                    {
+                        h.down = false;
+                        continue;
+                    }
+                    const bool repeats = i < 4;
+                    if (!h.down)
+                    {
+                        h.down = true;
+                        h.next = t + 0.38;
+                        ps2x::ingame::padEvent(kNames[i]);
+                    }
+                    else if (repeats && t >= h.next)
+                    {
+                        h.next = t + 0.11;
+                        ps2x::ingame::padEvent(kNames[i]);
+                    }
+                }
+                s_wasOpen = true;
+            }
+            else
+                s_wasOpen = false;
             ps2x::ingame::update(hwnd);
             if (m_eeScheduler && m_eeScheduler->paused() != ps2x::ingame::isOpen())
                 m_eeScheduler->setPaused(ps2x::ingame::isOpen());

@@ -6,29 +6,58 @@
   "game": {
     "kind": "iso",
     "label": "Your disc image (.iso) of Shinobi for PlayStation 2, USA release, serial SLUS-20459.",
-    "check": { "iso9660": "SLUS_204.59" }
+    "check": {
+      "iso9660": "SLUS_204.59"
+    }
   },
   "prepare": {
-    "program": ["Shinobi Launcher.exe"],
-    "args": ["--prepare", "--game", "{game}"],
+    "program": [
+      "Shinobi Launcher.exe"
+    ],
+    "args": [
+      "--prepare",
+      "--game",
+      "{game}"
+    ],
     "label": "The game's files from your disc (about 1.2 GB)",
     "timeout": 900
   },
   "start": {
-    "program": ["Shinobi Launcher.exe"],
-    "args": ["--play"]
+    "program": [
+      "Shinobi Launcher.exe"
+    ],
+    "args": [
+      "--play"
+    ]
   },
-  "saves": ["{install}/saves"],
+  "saves": [
+    "{install}/saves"
+  ],
   "folders": {
-    "saves": [{ "path": "{install}/saves" }],
-    "logs": [{ "path": "{install}/game/captures" }]
+    "saves": [
+      {
+        "path": "{install}/saves"
+      }
+    ],
+    "logs": [
+      {
+        "path": "{install}/game/captures"
+      }
+    ]
   },
   "config": [
     {
       "id": "main",
       "format": "ini",
-      "file": [{ "path": "{install}/game/settings.ini" }],
-      "ensure": { "video/window": "borderless", "video/aspect": "16:9" },
+      "file": [
+        {
+          "path": "{install}/game/settings.ini"
+        }
+      ],
+      "ensure": {
+        "video/window": "borderless",
+        "video/aspect": "16:9"
+      },
       "new": {
         "video/renderer": "pcsx2",
         "video/render_scale": "3",
@@ -48,88 +77,350 @@
   ],
   "settings": [
     {
-      "id": "resolution", "label": "Resolution",
+      "id": "resolution",
+      "label": "Resolution",
       "help": "What the game draws at. Native is the PS2's own; higher needs a faster graphics card.",
       "choices": [
-        { "label": "Native", "set": { "video/render_scale": "1" } },
-        { "label": "720p", "set": { "video/render_scale": "2" } },
-        { "label": "1080p", "set": { "video/render_scale": "3" } },
-        { "label": "1440p", "set": { "video/render_scale": "4" } },
-        { "label": "4K", "set": { "video/render_scale": "6" } }
+        {
+          "label": "Native",
+          "set": {
+            "video/render_scale": "1"
+          }
+        },
+        {
+          "label": "720p",
+          "set": {
+            "video/render_scale": "2"
+          }
+        },
+        {
+          "label": "1080p",
+          "set": {
+            "video/render_scale": "3"
+          }
+        },
+        {
+          "label": "1440p",
+          "set": {
+            "video/render_scale": "4"
+          }
+        },
+        {
+          "label": "4K",
+          "set": {
+            "video/render_scale": "6"
+          }
+        },
+        {
+          "label": "8K",
+          "set": {
+            "video/render_scale": "12"
+          }
+        }
       ],
-      "defaults": { "video/render_scale": "3" }
+      "defaults": {
+        "video/render_scale": "3"
+      }
     },
     {
-      "id": "renderer", "label": "Renderer",
+      "id": "renderer",
+      "label": "Renderer",
       "help": "D3D11 works on every PC. Try Vulkan if D3D11 gives you trouble.",
       "choices": [
-        { "label": "D3D11", "set": { "video/pcsx2_renderer": "d3d11" } },
-        { "label": "Vulkan", "set": { "video/pcsx2_renderer": "vulkan" } }
+        {
+          "label": "D3D11",
+          "set": {
+            "video/pcsx2_renderer": "d3d11"
+          }
+        },
+        {
+          "label": "Vulkan",
+          "set": {
+            "video/pcsx2_renderer": "vulkan"
+          }
+        }
       ],
-      "defaults": { "video/pcsx2_renderer": "d3d11" }
+      "defaults": {
+        "video/pcsx2_renderer": "d3d11"
+      }
     },
     {
-      "id": "frame_rate", "label": "Frame rate",
+      "id": "frame_rate",
+      "label": "Frame rate",
       "help": "The game is made for 60. Unlocked runs as fast as your PC can and may speed parts of the game up.",
       "choices": [
-        { "label": "60", "set": { "video/fps_target": "60" } },
-        { "label": "50", "set": { "video/fps_target": "50" } },
-        { "label": "30", "set": { "video/fps_target": "30" } },
-        { "label": "Unlocked", "set": { "video/fps_target": "unlocked" } }
+        {
+          "label": "60",
+          "set": {
+            "video/fps_target": "60"
+          }
+        },
+        {
+          "label": "50",
+          "set": {
+            "video/fps_target": "50"
+          }
+        },
+        {
+          "label": "30",
+          "set": {
+            "video/fps_target": "30"
+          }
+        },
+        {
+          "label": "Unlocked",
+          "set": {
+            "video/fps_target": "unlocked"
+          }
+        }
       ],
-      "defaults": { "video/fps_target": "60" }
+      "defaults": {
+        "video/fps_target": "60"
+      }
     },
     {
-      "id": "aspect", "label": "Widescreen",
+      "id": "aspect",
+      "label": "Widescreen",
       "help": "16:9 is recommended. 21:9 and wider are experimental and can crash.",
       "choices": [
-        { "label": "16:9", "set": { "video/aspect": "16:9" } },
-        { "label": "Off (4:3)", "set": { "video/aspect": "4:3" } },
-        { "label": "21:9", "set": { "video/aspect": "21:9" } },
-        { "label": "32:9", "set": { "video/aspect": "32:9" } },
-        { "label": "Auto", "set": { "video/aspect": "auto" } }
+        {
+          "label": "16:9",
+          "set": {
+            "video/aspect": "16:9"
+          }
+        },
+        {
+          "label": "Off (4:3)",
+          "set": {
+            "video/aspect": "4:3"
+          }
+        },
+        {
+          "label": "21:9",
+          "set": {
+            "video/aspect": "21:9"
+          }
+        },
+        {
+          "label": "32:9",
+          "set": {
+            "video/aspect": "32:9"
+          }
+        },
+        {
+          "label": "Auto",
+          "set": {
+            "video/aspect": "auto"
+          }
+        }
       ],
-      "defaults": { "video/aspect": "16:9" }
+      "defaults": {
+        "video/aspect": "16:9"
+      }
     },
     {
-      "id": "vsync", "label": "V-Sync",
+      "id": "vsync",
+      "label": "V-Sync",
       "help": "Stops tearing. Turn off only on a variable-refresh screen.",
       "choices": [
-        { "label": "On", "set": { "video/vsync": "true" } },
-        { "label": "Off", "set": { "video/vsync": "false" } }
+        {
+          "label": "On",
+          "set": {
+            "video/vsync": "true"
+          }
+        },
+        {
+          "label": "Off",
+          "set": {
+            "video/vsync": "false"
+          }
+        }
       ],
-      "defaults": { "video/vsync": "true" }
+      "defaults": {
+        "video/vsync": "true"
+      }
     },
     {
-      "id": "textures", "label": "Texture quality",
+      "id": "textures",
+      "label": "Texture quality",
       "help": "Anisotropic filtering: keeps floors and walls sharp at an angle.",
       "choices": [
-        { "label": "Off", "set": { "video/anisotropic": "off" } },
-        { "label": "2x", "set": { "video/anisotropic": "2" } },
-        { "label": "4x", "set": { "video/anisotropic": "4" } },
-        { "label": "8x", "set": { "video/anisotropic": "8" } },
-        { "label": "16x", "set": { "video/anisotropic": "16" } }
+        {
+          "label": "Off",
+          "set": {
+            "video/anisotropic": "off"
+          }
+        },
+        {
+          "label": "2x",
+          "set": {
+            "video/anisotropic": "2"
+          }
+        },
+        {
+          "label": "4x",
+          "set": {
+            "video/anisotropic": "4"
+          }
+        },
+        {
+          "label": "8x",
+          "set": {
+            "video/anisotropic": "8"
+          }
+        },
+        {
+          "label": "16x",
+          "set": {
+            "video/anisotropic": "16"
+          }
+        }
       ],
-      "defaults": { "video/anisotropic": "2" }
+      "defaults": {
+        "video/anisotropic": "2"
+      }
     },
     {
-      "id": "antialiasing", "label": "Anti-aliasing",
+      "id": "antialiasing",
+      "label": "Anti-aliasing",
       "help": "Smooths jagged edges. Edge AA is the sharper of the two.",
       "choices": [
-        { "label": "Off", "set": { "video/antialias": "false", "video/edge_aa": "false" } },
-        { "label": "FXAA", "set": { "video/antialias": "true", "video/edge_aa": "false" } },
-        { "label": "Edge AA", "set": { "video/antialias": "false", "video/edge_aa": "true" } }
+        {
+          "label": "Off",
+          "set": {
+            "video/antialias": "false",
+            "video/edge_aa": "false"
+          }
+        },
+        {
+          "label": "FXAA",
+          "set": {
+            "video/antialias": "true",
+            "video/edge_aa": "false"
+          }
+        },
+        {
+          "label": "Edge AA",
+          "set": {
+            "video/antialias": "false",
+            "video/edge_aa": "true"
+          }
+        }
       ],
-      "defaults": { "video/antialias": "false", "video/edge_aa": "false" }
+      "defaults": {
+        "video/antialias": "false",
+        "video/edge_aa": "false"
+      }
     },
     {
-      "id": "window", "label": "Window",
+      "id": "window",
+      "label": "Window",
       "help": "Alt+Enter or F11 also switches in game.",
       "choices": [
-        { "label": "Fullscreen (borderless)", "set": { "video/window": "borderless" } },
-        { "label": "Windowed", "set": { "video/window": "windowed" } }
+        {
+          "label": "Fullscreen (borderless)",
+          "set": {
+            "video/window": "borderless"
+          }
+        },
+        {
+          "label": "Windowed",
+          "set": {
+            "video/window": "windowed"
+          }
+        }
       ],
-      "defaults": { "video/window": "borderless" }
+      "defaults": {
+        "video/window": "borderless"
+      }
+    },
+    {
+      "id": "haptics",
+      "label": "DualSense haptics",
+      "help": "Footsteps, shuriken, sword hits, dash and ninja magic felt through a DualSense or DualSense Edge (USB or Bluetooth).",
+      "choices": [
+        {
+          "label": "On",
+          "set": {
+            "input/haptics": "true"
+          }
+        },
+        {
+          "label": "Off",
+          "set": {
+            "input/haptics": "false"
+          }
+        }
+      ],
+      "defaults": {
+        "input/haptics": "true"
+      }
+    },
+    {
+      "id": "trigger_resistance",
+      "label": "L2 trigger resistance",
+      "help": "L2 stiffens and clicks through just before the ninja magic fires.",
+      "choices": [
+        {
+          "label": "On",
+          "set": {
+            "input/trigger_resistance": "true"
+          }
+        },
+        {
+          "label": "Off",
+          "set": {
+            "input/trigger_resistance": "false"
+          }
+        }
+      ],
+      "defaults": {
+        "input/trigger_resistance": "true"
+      }
+    },
+    {
+      "id": "close_camera",
+      "label": "Close-up camera",
+      "help": "A closer, over-the-shoulder camera. F3 switches it in game.",
+      "choices": [
+        {
+          "label": "On",
+          "set": {
+            "game/close_camera": "true"
+          }
+        },
+        {
+          "label": "Off",
+          "set": {
+            "game/close_camera": "false"
+          }
+        }
+      ],
+      "defaults": {
+        "game/close_camera": "false"
+      }
+    },
+    {
+      "id": "stats_overlay",
+      "label": "Performance overlay",
+      "help": "FPS, frame time, CPU, GPU, RAM and VRAM in the top-left corner. F2 switches it in game.",
+      "choices": [
+        {
+          "label": "On",
+          "set": {
+            "performance/stats_overlay": "true"
+          }
+        },
+        {
+          "label": "Off",
+          "set": {
+            "performance/stats_overlay": "false"
+          }
+        }
+      ],
+      "defaults": {
+        "performance/stats_overlay": "false"
+      }
     }
   ]
 }

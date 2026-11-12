@@ -18,6 +18,9 @@ std::atomic<bool> g_ps2MouseLookActive{false};
 std::atomic<float> g_ps2MouseStickX{0.0f};
 std::atomic<float> g_ps2MouseStickY{0.0f};
 
+// LOCAL PATCH (haptics trace): src/lib/ps2_haptics_trace.cpp
+void ps2xHapticTrace(const char *tag, uint32_t a, uint32_t b, uint32_t c);
+
 namespace ps2_stubs
 {
     namespace
@@ -948,8 +951,21 @@ namespace ps2_stubs
 
     void scePadSetActDirect(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        (void)rdram;
         (void)runtime;
+        // LOCAL PATCH (haptics trace): what the game sends to the two motors (small: on/off, large: 0..255).
+        {
+            const uint32_t address = getRegU32(ctx, 6) & 0x1FFFFFFFu;
+            if (address && address < PS2_RAM_SIZE - 6u)
+            {
+                static uint32_t s_last = 0xFFFFFFFFu;
+                const uint32_t motors = static_cast<uint32_t>(rdram[address]) | (static_cast<uint32_t>(rdram[address + 1u]) << 8);
+                if (motors != s_last)
+                {
+                    s_last = motors;
+                    ::ps2xHapticTrace("PAD_MOTORS", rdram[address], rdram[address + 1u], getRegU32(ctx, 4));
+                }
+            }
+        }
         setReturnS32(ctx, 1);
     }
 

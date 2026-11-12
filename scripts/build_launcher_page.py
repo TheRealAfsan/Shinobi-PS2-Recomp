@@ -183,6 +183,7 @@ body{margin:0;width:1000px;height:640px;overflow:hidden;background:#16161a}
 .win{border:0!important;border-radius:0!important;box-shadow:none!important}
 .tb{user-select:none;-webkit-user-select:none;app-region:drag;-webkit-app-region:drag}
 .tbb{app-region:no-drag;-webkit-app-region:no-drag}
+html.manual-open .tb{app-region:no-drag;-webkit-app-region:no-drag}
 .foot-wrap{margin-top:auto;display:flex;flex-direction:column;gap:5px}
 .foot-wrap .foot{margin-top:0;padding-top:0}
 .own{margin:0;font-family:Rajdhani,sans-serif;font-size:11px;font-weight:600;line-height:1.25;color:#4a4a52;
@@ -304,9 +305,153 @@ template = must_replace(template, '<span>Shinobi (PS2 Recom) Launcher - by TheRe
 template = must_replace(template, '<h2>Shinobi - PS2 Recompilation</h2>', '<h2>{{cardTitle}}</h2>')
 template = re.sub(r'<p>Ignite the fiery vengeance.*?</p>', '<p>{{cardText}}</p>', template, count=1, flags=re.S)
 template = must_replace(template, '<button class="btn" sc-camel-on-click="{{openCredits}}"><span class="lab">Credits</span></button>',
-                        '<button class="btn {{lastCls}}" sc-camel-on-click="{{lastBtn}}"><span class="lab">{{lastLabel}}</span></button>')
+                        '<div style="display:flex;gap:8px">'
+                        '<button class="btn" style="flex:1 1 0;min-width:0" title="The game manual (your own PDF), turned like a book" '
+                        'sc-camel-on-click="{{openManual}}" title="In game: F4"><span class="lab">Manual</span></button>'
+                        '<button class="btn {{lastCls}}" style="flex:1 1 0;min-width:0" sc-camel-on-click="{{lastBtn}}"><span class="lab">{{lastLabel}}</span></button>'
+                        '</div>')
 template = must_replace(template, '<button class="btn sm" sc-camel-on-click="{{reset}}"><span class="lab">Reset to Defaults</span></button>',
-                        '<button class="btn sm {{resetCls}}" sc-camel-on-click="{{resetBtn}}"><span class="lab">{{resetLabel}}</span></button>')
+                        '<div style="display:flex;gap:8px">'
+                        '<button class="btn sm {{resetCls}}" style="flex:1 1 0;min-width:0" sc-camel-on-click="{{resetBtn}}"><span class="lab">{{resetLabel}}</span></button>'
+                        '<button class="btn sm" style="flex:1 1 0;min-width:0" title="Lighter settings for slower PCs" sc-camel-on-click="{{lowEndBtn}}"><span class="lab">Low-end PC</span></button>'
+                        '</div>')
+
+# Mod Menu: Hotsuma's scarf colour (settings [game] scarf_color, ps2_scarf_colour.cpp), above the switches.
+template = must_replace(template, '<sc-for list="{{modRows}}" as="m" hint-placeholder-count="4">',
+                        '<div class="mrow scarfrow">'
+                        '<div><b>Scarf colour</b><span>{{scarfDesc}}</span></div>'
+                        '<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;justify-content:flex-end;max-width:260px">'
+                        '<sc-for list="{{scarfSwatches}}" as="c" hint-placeholder-count="8">'
+                        '<button class="swatch" style="{{c.style}}" title="{{c.name}}" aria-label="{{c.name}}" '
+                        'aria-pressed="{{c.on}}" sc-camel-on-click="{{c.pick}}"></button>'
+                        '</sc-for>'
+                        '<input type="color" style="width:30px;height:24px;padding:0;border:1px solid #888;border-radius:4px;background:none;cursor:pointer" value="{{scarfHex}}" title="Any colour" aria-label="Pick any scarf colour" '
+                        'sc-camel-on-change="{{scarfPick}}">'
+                        '</div></div>'
+                        '<sc-for list="{{modRows}}" as="m" hint-placeholder-count="4">')
+
+
+# ---- LOCAL PATCH: settings panel in three tabs (Display / Graphics / Controller), window mode dropdown, haptics ----
+CHK = ('<span class="bx"><svg width="12" height="10" sc-camel-view-box="0 0 12 10" aria-hidden="true"><path d="M1 5l3.5 3.5L11 1.5" '
+       'fill="none" stroke="#fff" stroke-width="2.2"></path></svg></span>')
+template = must_replace(template, '<h2>Graphical Settings</h2>',
+    '<h2>Settings</h2>\n'
+    '        <div class="segs tabs" role="tablist" aria-label="Settings pages"><sc-for list="{{tabOpts}}" as="t" hint-placeholder-count="3">'
+    '<button class="seg {{t.cls}}" role="tab" aria-selected="{{t.on}}" sc-camel-on-click="{{t.pick}}">{{t.name}}</button></sc-for></div>\n'
+    '        <sc-if value="{{tabDisplay}}" hint-placeholder-val="{{true}}">')
+_m = re.search(r'\n(\s*)<div( class="inl")?>\s*<div class="fl">Renderer</div>', template)
+assert _m, 'renderer anchor'
+template = template[:_m.start()] + (
+    '\n        <div>\n'
+    '          <div class="fl">Window Mode</div>\n'
+    '          <div class="selwrap">\n'
+    '            <button class="sel" aria-haspopup="listbox" aria-expanded="{{winOpen}}" sc-camel-on-click="{{toggleWin}}">\n'
+    '              <span>{{winLabel}}</span>\n'
+    '              <svg width="12" height="8" sc-camel-view-box="0 0 12 8" aria-hidden="true"><path d="M1 1l5 5 5-5" fill="none" stroke="#17171a" stroke-width="2"></path></svg>\n'
+    '            </button>\n'
+    '            <sc-if value="{{winOpen}}" hint-placeholder-val="{{false}}">\n'
+    '              <button class="away" tabindex="-1" aria-hidden="true" sc-camel-on-click="{{closeWin}}"></button>\n'
+    '              <div class="menu" role="listbox" aria-label="Window mode">\n'
+    '                <sc-for list="{{winOptions}}" as="o" hint-placeholder-count="3">\n'
+    '                  <button class="opt {{o.cls}}" role="option" aria-selected="{{o.on}}" sc-camel-on-click="{{o.pick}}"><span>{{o.name}}</span><em>{{o.sub}}</em></button>\n'
+    '                </sc-for>\n'
+    '              </div>\n'
+    '            </sc-if>\n'
+    '          </div>\n'
+    '        </div>\n') + template[_m.start():]
+_m = re.search(r'\n\s*<div>\s*<div class="fl"[^>]*><span>Texture Quality', template)
+assert _m, 'texture anchor'
+template = template[:_m.start()] + '\n        </sc-if>\n        <sc-if value="{{tabGraphics}}" hint-placeholder-val="{{false}}">' + template[_m.start():]
+_m = re.search(r'\n\s*<div class="act">', template)
+assert _m, 'act anchor'
+template = template[:_m.start()] + (
+    '\n        </sc-if>\n'
+    '        <sc-if value="{{tabController}}" hint-placeholder-val="{{false}}">\n'
+    '        <div>\n'
+    '          <label class="chk"><input type="checkbox" checked="{{haptics}}" sc-camel-on-change="{{toggleHaptics}}">' + CHK +
+    'Haptic Feedback (DualSense)</label>\n'
+    '          <p class="note" style="margin:2px 0 6px 30px;font-size:11px;color:#777">Footsteps, shuriken, sword hits, dash and ninja magic, on the left and right of the controller. USB or Bluetooth.</p>\n'
+    '        </div>\n'
+    '        <div>\n'
+    '          <div class="fl"><span>Haptic Strength</span><em>{{hapStrName}}</em></div>\n'
+    '          <div class="rng"><div class="trk" style="background: {{hapStrBg}}"></div><input type="range" min="1" max="10" step="1" value="{{hapStr}}" sc-camel-on-change="{{setHapStr}}" aria-label="Haptic strength"></div>\n'
+    '        </div>\n'
+    '        <div>\n'
+    '          <label class="chk"><input type="checkbox" checked="{{trig}}" sc-camel-on-change="{{toggleTrig}}">' + CHK +
+    'L2 Trigger Resistance</label>\n'
+    '          <p class="note" style="margin:2px 0 0 30px;font-size:11px;color:#777">L2 stiffens part way down and clicks through just before the ninja magic fires.</p>\n'
+    '        </div>\n'
+    '        </sc-if>') + template[_m.start():]
+css_tabs = ('html.manual-only body>*:not([role=dialog]){visibility:hidden!important}html body .pad-focus.pad-focus.pad-focus{outline:3px solid #ff1f3d!important;outline-offset:-3px!important;box-shadow:inset 0 0 14px rgba(255,31,61,.55),0 0 14px rgba(255,31,61,.7)!important;position:relative;z-index:2}.tabs{margin:0 0 6px}.tabs .seg{flex:1 1 auto;min-width:0;padding-left:6px!important;padding-right:6px!important;font-size:12.5px!important;letter-spacing:0!important}html.tabbed .grp>*{animation:none!important;opacity:1!important}'
+            '.grp>sc-if>div,.grp sc-if>div{margin-bottom:2px}')
+template = must_replace(template, '@media (prefers-reduced-motion:reduce)', css_tabs + '@media (prefers-reduced-motion:reduce)')
+
+
+# ---- LOCAL PATCH: hero slideshow. The key art, then the pictures in Pictures\lauccher art N.jpg (N = 2, 3, ...),
+# crossfading every 5 seconds, in a loop. Each picture is a layer over the key art, under the shading.
+_slides = []
+_pics = os.path.join(os.environ['USERPROFILE'], 'Pictures')
+for _n in range(2, 20):
+    _f = os.path.join(_pics, 'lauccher art %d.jpg' % _n)
+    if not os.path.exists(_f):
+        continue
+    _im = Image.open(_f).convert('RGB')
+    if _im.height > 1200:
+        _im = _im.resize((round(_im.width * 1200 / _im.height), 1200), Image.LANCZOS)
+    _uid = str(uuid.uuid4())
+    manifest[_uid] = {'mime': 'image/jpeg', 'compressed': False, 'data': base64.b64encode(_jpg(_im)).decode()}
+    _slides.append(_uid)
+if _slides:
+    _hold = 5.0
+    _cycle = _hold * (len(_slides) + 1)
+    _imgs = ''.join('\n      <img class="slide" src="%s" alt="" aria-hidden="true" style="animation-delay:%.1fs">' % (u, _hold * (i + 1))
+                    for i, u in enumerate(_slides))
+    _m = re.search(r'(<img class="art" src="[^"]+" alt="[^"]*">)', template)
+    assert _m, 'hero art'
+    template = template[:_m.end()] + _imgs + template[_m.end():]
+    _fade = 1.0 / _cycle * 100.0          # one second, in percent of the cycle
+    _show = _hold / _cycle * 100.0
+    css_slides = ('.hero .slide{position:absolute;inset:0;width:100%%;height:100%%;object-fit:cover;opacity:0;'
+                  'animation:heroSlide %.1fs linear infinite;pointer-events:none}'
+                  '@keyframes heroSlide{0%%{opacity:0}%.2f%%{opacity:1}%.2f%%{opacity:1}%.2f%%{opacity:0}100%%{opacity:0}}'
+                  % (_cycle, _fade, _show, _show + _fade))
+    template = must_replace(template, '@media (prefers-reduced-motion:reduce)', css_slides + '@media (prefers-reduced-motion:reduce)')
+    print('hero slideshow:', len(_slides), 'pictures')
+
+
+# ---- LOCAL PATCH: Graphics tab gets Blending + Texture Filtering; a new Effects tab (screen filter, dithering,
+# mipmapping, upscaling fixes) ----
+def _segrow(label, binding, count, tip=''):
+    return ('        <div>\n'
+            '          <div class="fl"' + (' title="%s"' % tip if tip else '') + '>' + label + '</div>\n'
+            '          <div class="segs" role="group" aria-label="' + label + '">\n'
+            '            <sc-for list="{{' + binding + '}}" as="o" hint-placeholder-count="' + str(count) + '">\n'
+            '              <button class="seg {{o.cls}}" aria-pressed="{{o.on}}" sc-camel-on-click="{{o.pick}}">{{o.name}}</button>\n'
+            '            </sc-for>\n'
+            '          </div>\n'
+            '        </div>\n')
+def _chkrow(label, binding, toggle, note):
+    return ('        <div>\n'
+            '          <label class="chk"><input type="checkbox" checked="{{' + binding + '}}" sc-camel-on-change="{{' + toggle + '}}">' + CHK + label + '</label>\n'
+            '          <p class="note" style="margin:0 0 4px 30px;font-size:11px;color:#777">' + note + '</p>\n'
+            '        </div>\n')
+template = must_replace(template, '        </sc-if>\n        <sc-if value="{{tabController}}"',
+    _segrow('Blending Accuracy', 'blendOpts', 4, 'How exactly glows, smoke and see-through effects are drawn. Higher costs more GPU.') +
+    _segrow('Texture Filtering', 'texfOpts', 2, 'As on PS2 keeps each texture as the game asked; Bilinear smooths them all.') +
+    '        </sc-if>\n'
+    '        <sc-if value="{{tabEffects}}" hint-placeholder-val="{{false}}">\n' +
+    _segrow('Screen Filter', 'scrfOpts', 4, 'Sharp shows the pixels; Smooth blends them; Scanlines and CRT look like an old TV.') +
+    _chkrow('Dithering', 'dith', 'toggleDith', 'The PS2&#39;s grainy colour pattern. Untick for smooth, clean gradients.') +
+    _chkrow('Mipmapping', 'mip', 'toggleMip', 'Less shimmer on distant floors and walls. Applies after a restart.') +
+    _chkrow('Upscaling Fixes', 'upfix', 'toggleUpfix', 'Removes seams and thin lines at high resolutions. Applies after a restart.') +
+    '        </sc-if>\n        <sc-if value="{{tabController}}"')
+
+# ---- LOCAL PATCH: performance overlay switch (Display tab) ----
+_i = template.index('V-Sync</label>') + len('V-Sync</label>')
+template = template[:_i] + ('\n          <label class="chk" title="Also F2 in game"><input type="checkbox" checked="{{ovl}}" sc-camel-on-change="{{toggleOvl}}">'
+                            + CHK + 'Performance Overlay (F2)</label>'
+                            + '\n          <label class="chk" title="Also F3 in game"><input type="checkbox" checked="{{cam}}" sc-camel-on-change="{{toggleCam}}">'
+                            + CHK + 'Close-Up Camera (F3)</label>') + template[_i:]
 
 # Bottom of the left column: the ownership notice above the PlayStation / SEGA logos, the studio and author lines below.
 template = must_replace(template,
@@ -376,9 +521,18 @@ template = must_replace(template, '            <sc-if value="{{showCredits}}" hi
                         '            <sc-if value="{{showGame}}" hint-placeholder-val="{{false}}">\n'
                         '              <div class="gamebox">\n'
                         '                <p class="note" style="margin-top:0">{{gameIntro}}</p>\n'
+                        '                <div style="display:flex;flex-direction:column;gap:5px;margin:10px 0 2px">'
+                        '<sc-for list="{{gameSteps}}" as="g" hint-placeholder-count="3">'
+                        '<div style="display:flex;align-items:center;gap:10px;font-size:13.5px">'
+                        '<span style="{{g.mark}}">{{g.icon}}</span><b style="{{g.text}}">{{g.label}}</b></div>'
+                        '</sc-for></div>\n'
                         '                <div class="pathrow"><span class="pathtxt" title="{{isoPath}}">{{isoPath}}</span>'
                         '<button class="btn sm" sc-camel-on-click="{{browseIso}}"><span class="lab">Browse...</span></button></div>\n'
                         '                <p class="note">{{isoStatus}}</p>\n'
+                        '                <label style="display:flex;align-items:center;gap:10px;margin:12px 0 0;cursor:pointer;font-size:13.5px">'
+                        '<input type="checkbox" checked="{{owned}}" sc-camel-on-change="{{toggleOwned}}" '
+                        'style="width:18px;height:18px;accent-color:#b3122a;cursor:pointer" aria-label="I own this game">'
+                        '<span>I own this copy of Shinobi and made the disc image from my own disc.</span></label>\n'
                         '                <button class="btn go" disabled="{{installBusy}}" sc-camel-on-click="{{installIso}}">'
                         '<sc-if value="{{installBusy}}" hint-placeholder-val="{{false}}"><span class="fill" style="width: {{installFill}}"></span></sc-if>'
                         '<span class="lab">{{installLabel}}</span></button>\n'
@@ -426,10 +580,11 @@ L("""    this.defaults = { res: '1080p', renderer: 'Vulkan', ws: true, vsync: fa
       mods: { intro: true, fps: false, tex: false, dbg: false }
     });""",
   """    // Defaults: the game's own (ps2_settings.cpp) where it has them.
-    this.defaults = { res: '1080p', renderer: 'D3D11', fps: '60', ws: true, wsShape: '16:9', vsync: true, tex: 1, fx: 1, aa: 'Off', msaa: 4 };
+    this.defaults = { res: '1080p', renderer: 'D3D11', fps: '60', ws: true, wsShape: '16:9', vsync: true, tex: 1, fx: 1, aa: 'Off', msaa: 4, blend: 'basic' };
     this.defBinds = { up: 'UP,W', down: 'DOWN,S', left: 'LEFT,A', right: 'RIGHT,D', cross: 'X,SPACE', circle: 'C,ESCAPE', square: 'Z,KP_0', triangle: 'V,KP_1', l1: 'Q', r1: 'E', l2: 'LEFT_SHIFT', r2: 'RIGHT_SHIFT', start: 'ENTER', select: 'TAB' };
-    this.defMods = { studio: true, nscale: true, rr5fix: false, dropst: false, record: false, intro: false, fastvu: false, dbg: false, full: true, diag: false, legacy: false };
+    this.defMods = { studio: true, nscale: true, rr5fix: false, dropst: false, record: false, intro: false, fastvu: false, dbg: false, full: true, diag: false, legacy: false, k8: false };
     const init = window.__launcherInit || null;
+    this.manualOnly = !!(init && init.manualOnly);
     const start = Object.assign({}, this.defaults, init ? init.settings : {});
     this.state = Object.assign({}, start, {
       resOpen: false, modal: null, guide: 0,
@@ -497,7 +652,7 @@ L("""  sig(s) {""",
   // option of a segmented row, else move too; Cross / Enter presses; Circle / Escape closes the dialog (in game: resumes);
   // Start resumes in game. A red outline shows where you are.
   navItems() {
-    const scope = document.querySelector('.dlg') || document;
+    const scope = document.querySelector('.menu') || document.querySelector('.dlg') || document;
     return Array.from(scope.querySelectorAll('button, input, [tabindex="0"]')).filter((el) => {
       if (el.disabled || el.classList.contains('scrim-bg') || el.classList.contains('away')) return false;
       if (el.closest('.tb')) return false;
@@ -512,8 +667,34 @@ L("""  sig(s) {""",
     const target = el.matches('input[type=checkbox]') ? (el.closest('label') || el) : el;
     target.classList.add('pad-focus');
     this.navCurrent = el;
+    // Remembered by position and text, to put the marker back when the page redraws its controls.
+    const all = this.navItems();
+    this.navIdx = all.indexOf(el);
+    this.navTxt = (target.textContent || '').trim();
     el.focus({ preventScroll: true });
     target.scrollIntoView({ block: 'nearest' });
+  }
+
+  // After a redraw the marked control is a new element: find it again (same text, nearest place) and mark it.
+  navRestore() {
+    if (this.navIdx === undefined || this.navIdx < 0) return;
+    const cur = this.navCurrent;
+    const curTarget = cur && (cur.matches('input[type=checkbox]') ? (cur.closest('label') || cur) : cur);
+    if (cur && document.contains(cur) && curTarget.classList.contains('pad-focus')) return;
+    const items = this.navItems();
+    let best = null, bestD = Infinity;
+    items.forEach((el, i) => {
+      const t = el.matches('input[type=checkbox]') ? (el.closest('label') || el) : el;
+      if ((t.textContent || '').trim() !== this.navTxt) return;
+      const d = Math.abs(i - this.navIdx);
+      if (d < bestD) { bestD = d; best = el; }
+    });
+    if (!best) best = items[Math.min(this.navIdx, items.length - 1)];
+    if (best) {
+      document.querySelectorAll('.pad-focus').forEach((e) => e.classList.remove('pad-focus'));
+      (best.matches('input[type=checkbox]') ? (best.closest('label') || best) : best).classList.add('pad-focus');
+      this.navCurrent = best;
+    }
   }
 
   navMove(delta) {
@@ -522,6 +703,34 @@ L("""  sig(s) {""",
     let i = items.indexOf(this.navCurrent);
     i = i < 0 ? 0 : (i + delta + items.length) % items.length;
     this.navFocus(items[i]);
+  }
+
+  // Moves to the nearest control in direction (dx, dy): candidates must lie that way; ones overlapping the current
+  // control across the move (same row for left/right, same column for up/down) win, then the closest.
+  navDir(dx, dy) {
+    const items = this.navItems();
+    if (!items.length) return;
+    const cur = this.navCurrent && document.contains(this.navCurrent) ? this.navCurrent : null;
+    if (!cur) { this.navFocus(items[0]); return; }
+    const box = (el) => (el.matches('input[type=checkbox]') ? (el.closest('label') || el) : el).getBoundingClientRect();
+    const a = box(cur);
+    const ac = { x: (a.left + a.right) / 2, y: (a.top + a.bottom) / 2 };
+    let best = null, bestScore = Infinity;
+    for (const el of items) {
+      if (el === cur) continue;
+      const r = box(el);
+      if (r.width === 0 && r.height === 0) continue;
+      const c = { x: (r.left + r.right) / 2, y: (r.top + r.bottom) / 2 };
+      // How far it is in the pressed direction (edge to edge), and how far off to the side.
+      const along = dx ? (dx > 0 ? r.left - a.right : a.left - r.right) : (dy > 0 ? r.top - a.bottom : a.top - r.bottom);
+      const ahead = dx ? (dx > 0 ? c.x - ac.x : ac.x - c.x) : (dy > 0 ? c.y - ac.y : ac.y - c.y);
+      if (ahead <= 4 || along < -Math.min(a.width, a.height, r.width, r.height) / 2) continue;
+      const overlap = dx ? Math.min(a.bottom, r.bottom) - Math.max(a.top, r.top) : Math.min(a.right, r.right) - Math.max(a.left, r.left);
+      const side = overlap > 0 ? 0 : (dx ? Math.abs(c.y - ac.y) : Math.abs(c.x - ac.x));
+      const score = Math.max(0, along) + side * 3 + (overlap > 0 ? 0 : 400);
+      if (score < bestScore) { bestScore = score; best = el; }
+    }
+    if (best) this.navFocus(best);
   }
 
   navSide(delta) {
@@ -536,24 +745,39 @@ L("""  sig(s) {""",
     const group = el && el.parentElement && (el.matches('.seg, .chipb') ? el.parentElement : null);
     if (group) {
       const sibs = Array.from(group.querySelectorAll('.seg, .chipb'));
+      // Left / right move between the options of a row; Cross picks one (as on a console).
       const next = sibs[sibs.indexOf(el) + delta];
-      if (next) { next.click(); setTimeout(() => this.navFocus(next), 0); }
-      return;
+      if (next) { this.navFocus(next); return; }
     }
-    this.navMove(delta);
+    this.navDir(delta, 0);
   }
 
   navBack() {
     const x = document.querySelector('.dlg .x');
     if (x) { x.click(); setTimeout(() => this.navMove(0), 0); return; }
-    if (this.state.resOpen) { this.setState({ resOpen: false }); return; }
+    if (this.state.resOpen || this.state.winOpen) {
+      this.setState({ resOpen: false, winOpen: false });
+      setTimeout(() => { const o = this.navOpener && document.contains(this.navOpener) ? this.navOpener : document.querySelector('.sel'); if (o) this.navFocus(o); }, 30);
+      return;
+    }
     if (this.ingame && this.host) this.host.postMessage('resume');
   }
 
   navPress() {
     const el = this.navCurrent;
     if (!el || !document.contains(el)) { this.navMove(0); return; }
+    const opener = el.matches('.sel') ? el : null;
     el.click();
+    if (opener) {
+      this.navOpener = opener;
+      setTimeout(() => { const on = document.querySelector('.menu .opt.on') || document.querySelector('.menu .opt'); if (on) this.navFocus(on); }, 30);
+      return;
+    }
+    // A pick in an open list closes it: back to its button.
+    if (el.matches('.opt') && this.navOpener) {
+      setTimeout(() => { if (document.contains(this.navOpener)) this.navFocus(this.navOpener); }, 30);
+      return;
+    }
     setTimeout(() => { if (!document.contains(this.navCurrent)) this.navMove(0); }, 0);
   }
 
@@ -561,7 +785,7 @@ L("""  sig(s) {""",
     document.addEventListener('keydown', (e) => {
       if (this.state && this.state.listening) return; // binding a key in Configure Controller
       const k = e.key;
-      if (k === 'ArrowDown' || k === 'ArrowUp') { e.preventDefault(); this.navMove(k === 'ArrowDown' ? 1 : -1); }
+      if (k === 'ArrowDown' || k === 'ArrowUp') { e.preventDefault(); this.navDir(0, k === 'ArrowDown' ? 1 : -1); }
       else if (k === 'ArrowLeft' || k === 'ArrowRight') {
         if (this.navCurrent && this.navCurrent.matches('input[type=range]')) return; // the slider's own keys
         e.preventDefault(); this.navSide(k === 'ArrowRight' ? 1 : -1);
@@ -579,35 +803,71 @@ L("""  sig(s) {""",
       if (now >= h.next) { h.next = now + REPEAT_NEXT; fn(); }
     };
     let primed = false;
+    window.__nav = this;
+    this.navShow = () => { if (!this.navCurrent || !document.contains(this.navCurrent)) { this.navMove(0); return true; } return false; };
     const poll = () => {
-      const pads = navigator.getGamepads ? Array.from(navigator.getGamepads()).filter(Boolean) : [];
+      const pads = (navigator.getGamepads ? Array.from(navigator.getGamepads()).filter(Boolean) : [])
+        .filter((p) => !(this.hostPad && /054c/i.test(p.id || ''))); // a DualSense the launcher reads itself
       if (pads.length && !primed) {
         // Buttons already down when the page starts (Select+Start that opened the menu) count only after a release.
         primed = true;
-        const p0 = pads[0];
         [[0, 'cross'], [1, 'circle'], [9, 'start'], [12, 'up'], [13, 'down'], [14, 'left'], [15, 'right']].forEach(([i, n]) => {
-          if (p0.buttons[i] && p0.buttons[i].pressed) held[n] = { next: Infinity };
+          if (pads.some((p0) => p0.buttons[i] && p0.buttons[i].pressed)) held[n] = { next: Infinity };
         });
       }
       // While the game is starting or running the controller belongs to the game: Cross would press the launcher's Stop Game button.
       const gameBusy = !this.ingame && this.state && this.state.launch !== 'idle';
-      if (pads.length && !gameBusy && !(this.state && this.state.listening)) {
-        const p = pads[0];
-        const btn = (i) => !!(p.buttons[i] && p.buttons[i].pressed);
-        const ax = (i) => p.axes[i] || 0;
-        edge('up', btn(12) || ax(1) < -0.6, () => this.navMove(-1));
-        edge('down', btn(13) || ax(1) > 0.6, () => this.navMove(1));
+      if (pads.length && !gameBusy && !this.ingame && !(this.state && this.state.listening)) {
+        const RAW = { 0: 1, 1: 2, 2: 0, 3: 3, 9: 9 }; // standard index -> raw Sony index
+        const hat = (p) => { const v = p.axes[9]; if (v === undefined || v > 1.05 || v < -1.05) return -1; return Math.round((v + 1) * 3.5) % 8; };
+        const press = (p, i) => {
+          if (p.mapping === 'standard') return !!(p.buttons[i] && p.buttons[i].pressed);
+          if (i >= 12 && i <= 15) {
+            const h = hat(p);
+            if (h < 0) return false;
+            return i === 12 ? (h === 7 || h === 0 || h === 1) : i === 15 ? (h >= 1 && h <= 3) : i === 13 ? (h >= 3 && h <= 5) : (h >= 5 && h <= 7);
+          }
+          const r = RAW[i] !== undefined ? RAW[i] : i;
+          return !!(p.buttons[r] && p.buttons[r].pressed);
+        };
+        const btn = (i) => pads.some((p) => press(p, i));
+        const ax = (i) => pads.reduce((best, p) => { const v = p.axes[i] || 0; return Math.abs(v) > Math.abs(best) ? v : best; }, 0);
+        const manual = document.documentElement.classList.contains('manual-open') && this._book;
+        if (manual) {
+          const turn = (key) => document.dispatchEvent(new KeyboardEvent('keydown', { key: key, bubbles: true, cancelable: true }));
+          edge('left', btn(14) || ax(0) < -0.6, () => turn('ArrowLeft'));
+          edge('right', btn(15) || ax(0) > 0.6, () => turn('ArrowRight'));
+          edge('circle', btn(1), () => this.manualClose());
+        } else {
+        edge('up', btn(12) || ax(1) < -0.6, () => { if (!this.navShow()) this.navDir(0, -1); });
+        edge('down', btn(13) || ax(1) > 0.6, () => { if (!this.navShow()) this.navDir(0, 1); });
         edge('left', btn(14) || ax(0) < -0.6, () => this.navSide(-1));
         edge('right', btn(15) || ax(0) > 0.6, () => this.navSide(1));
         edge('cross', btn(0), () => this.navPress());
+        const tabStep = (d) => {
+          const tabs = Array.from(document.querySelectorAll('.tabs .seg'));
+          if (!tabs.length || document.querySelector('.dlg')) return;
+          const i = Math.max(0, tabs.findIndex((t) => t.classList.contains('on')));
+          const t = tabs[(i + d + tabs.length) % tabs.length];
+          t.click();
+          setTimeout(() => this.navFocus(document.querySelectorAll('.tabs .seg')[(i + d + tabs.length) % tabs.length]), 30);
+        };
+        edge('l1', btn(4), () => tabStep(-1));
+        edge('r1', btn(5), () => tabStep(1));
         edge('circle', btn(1), () => this.navBack());
+        }
         edge('start', btn(9), () => { if (this.ingame && this.host) this.host.postMessage('resume'); });
       }
+      this.navRestore();
       requestAnimationFrame(poll);
     };
     requestAnimationFrame(poll);
     // In game the menu starts on Resume.
-    if (this.ingame) setTimeout(() => this.navFocus(document.querySelector('.btn.go')), 150);
+    if (this.ingame && !this.manualOnly) setTimeout(() => this.navFocus(document.querySelector('.btn.go')), 150);
+    if (this.manualOnly) {
+      document.documentElement.classList.add('manual-only');
+      setTimeout(() => { if (this.host) this.host.postMessage('manual'); }, 30);
+    }
   }
 
   sig(s) {""")
@@ -616,7 +876,7 @@ L("""  sig(s) {
     return JSON.stringify({ res: s.res, renderer: s.renderer, ws: s.ws, vsync: s.vsync, tex: s.tex, fx: s.fx, aa: s.aa, msaa: s.msaa });
   }""",
   """  sig(s) {
-    return JSON.stringify({ res: s.res, renderer: s.renderer, fps: s.fps, ws: s.ws, wsShape: s.wsShape, vsync: s.vsync, tex: s.tex, fx: s.fx, aa: s.aa, bind: s.bind, mods: s.mods });
+    return JSON.stringify({ res: s.res, renderer: s.renderer, fps: s.fps, ws: s.ws, wsShape: s.wsShape, vsync: s.vsync, tex: s.tex, fx: s.fx, aa: s.aa, blend: s.blend, scarf: s.scarf || '', bind: s.bind, mods: s.mods });
   }
 
   send(cmd, extra) {
@@ -625,15 +885,52 @@ L("""  sig(s) {
     const lines = [cmd];
     const add = (k, v) => lines.push(k + '=' + String(v));
     add('res', s.res); add('renderer', s.renderer); add('fps', s.fps); add('ws', s.ws ? 1 : 0); add('wsShape', s.wsShape);
-    add('vsync', s.vsync ? 1 : 0); add('tex', s.tex); add('fx', s.fx); add('aa', s.aa);
+    add('vsync', s.vsync ? 1 : 0); add('tex', s.tex); add('fx', s.fx); add('aa', s.aa); add('blend', s.blend || 'basic');
+    add('scarf', s.scarf || 'original');
     Object.keys(s.mods).forEach((k) => add('mod.' + k, s.mods[k] ? 1 : 0));
     Object.keys(s.bind).forEach((k) => add('bind.' + k, s.bind[k]));
     if (extra) Object.keys(extra).forEach((k) => add(k, extra[k]));
     this.host.postMessage(lines.join('\\n'));
   }
 
+  // The F1 menu's controller, read by the game and sent here (see ps2_ingame_menu.h padEvent).
+  padCmd(name) {
+    // The launcher reads a DualSense itself (launcher_dualsense.cpp): from now on the page's own Gamepad API leaves Sony pads to it.
+    if (name === 'host') { this.hostPad = true; return; }
+    if (name === 'lost') { this.hostPad = false; return; }
+    // While the game is starting or running the controller belongs to the game.
+    if (!this.ingame && this.state && this.state.launch !== 'idle') return;
+    const manual = document.documentElement.classList.contains('manual-open') && this._book;
+    const key = (k) => document.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }));
+    if (manual) {
+      if (name === 'left') key('ArrowLeft');
+      else if (name === 'right') key('ArrowRight');
+      else if (name === 'circle') this.manualClose();
+      return;
+    }
+    if (name === 'up') { if (!this.navShow || !this.navShow()) this.navDir(0, -1); }
+    else if (name === 'down') { if (!this.navShow || !this.navShow()) this.navDir(0, 1); }
+    else if (name === 'left') this.navSide(-1);
+    else if (name === 'right') this.navSide(1);
+    else if (name === 'cross') this.navPress();
+    else if (name === 'circle') this.navBack();
+    else if (name === 'l1' || name === 'r1') this.navTab(name === 'l1' ? -1 : 1);
+    else if (name === 'start' && this.ingame && this.host) this.host.postMessage('resume');
+  }
+
+  navTab(d) {
+    const tabs = Array.from(document.querySelectorAll('.tabs .seg'));
+    if (!tabs.length || document.querySelector('.dlg')) return;
+    const i = Math.max(0, tabs.findIndex((t) => t.classList.contains('on')));
+    const n = (i + d + tabs.length) % tabs.length;
+    tabs[n].click();
+    setTimeout(() => this.navFocus(document.querySelectorAll('.tabs .seg')[n]), 30);
+  }
+
   onHost(msg) {
     const m = typeof msg === 'string' ? msg : '';
+    if (m.indexOf('pad:') === 0) { this.padCmd(m.slice(4)); return; }
+    if (m === 'manualhide') { this.manualHide(); return; }
     if (m === 'max:1' || m === 'max:0') { document.documentElement.classList.toggle('maxed', m === 'max:1'); return; }
     if (m === 'saved') { this.setState({ saved: this.sig(this.state) }); this.toastMsg('Settings saved'); }
     else if (m === 'saved:restart') { this.setState({ saved: this.sig(this.state), restart: true }); this.toastMsg('Saved - some changes apply after a restart'); }
@@ -641,6 +938,9 @@ L("""  sig(s) {
     else if (m === 'starting') { this.setState({ launch: 'launching', progress: 10 }); this.musicOff(); }
     else if (m === 'running') { clearInterval(this.timer); this.setState({ launch: 'running', progress: 100 }); this.musicOff(); }
     else if (m === 'exited') { clearInterval(this.timer); this.setState({ launch: 'idle', progress: 0 }); this.toastMsg('Game closed'); this.musicOn(); }
+    else if (m.indexOf('manual-progress:') === 0) { const a = m.slice(16).split('|'); this.toastMsg(+a[1] ? 'Preparing the manual... page ' + a[0] + ' of ' + a[1] : 'Preparing the manual...'); }
+    else if (m.indexOf('manual-error:') === 0) { this.toastMsg(m.slice(13)); }
+    else if (m.indexOf('manual:') === 0) { const a = m.slice(7).split('|'); this.manualShow(+a[0], a[1], a[2] || ''); }
     else if (m.indexOf('error:') === 0) { clearInterval(this.timer); this.setState({ launch: 'idle', progress: 0 }); this.toastMsg(m.slice(6)); this.musicOn(); }
   }""")
 
@@ -662,7 +962,9 @@ L("""  keyName(e) {
 
 L("""    const RES = [['720p', '1280 x 720'], ['1080p', '1920 x 1080'], ['1440p', '2560 x 1440'], ['4K', '3840 x 2160']];""",
   """    // The PCSX2 renderer draws at a whole multiple of the PS2's 448 lines.
-    const RES = [['Native', '1x  640 x 448'], ['720p', '2x  1280 x 896'], ['1080p', '3x  1920 x 1344'], ['1440p', '4x  2560 x 1792'], ['4K', '6x  3840 x 2688']];""")
+    const RES = [['Native', '1x  640 x 448'], ['720p', '2x  1280 x 896'], ['1080p', '3x  1920 x 1344'], ['1440p', '4x  2560 x 1792'], ['4K', '6x  3840 x 2688']]
+      // 8K (12x): PCSX2's highest upscale, for very powerful graphics cards.
+      .concat([['8K', '12x  7680 x 5376']]);""")
 
 if guide_ids:
     for key, cap, label, _ in GUIDES:
@@ -671,6 +973,23 @@ if guide_ids:
     new_sl = "    const SL = [\n" + ",\n".join(
         "      { src: '%s', cap: %s, label: %s }" % (guide_ids[k], json.dumps(c), json.dumps(l)) for k, c, l, _ in GUIDES) + "\n    ];"
     L(old_sl, new_sl)
+
+# Scarf colour row (Mod Menu).
+L("""      modRows: modRows,""",
+  """      modRows: modRows,
+      scarfDesc: s.scarf ? 'Hotsuma\\'s scarf in ' + s.scarf.toUpperCase() + '. Save to keep it; it changes in game straight away.' : 'Hotsuma\\'s scarf, red as in the original game. Pick a swatch or any colour.',
+      scarfHex: s.scarf || '#b0161e',
+      scarfSwatches: [['Original red', ''], ['Blue', '#2456d6'], ['Purple', '#7b35c9'], ['Green', '#2b9a45'],
+                      ['Gold', '#d4a017'], ['White', '#ececec'], ['Black', '#1c1c1f'], ['Pink', '#e2559e']].map((c) => ({
+        name: c[0], on: (s.scarf || '') === c[1],
+        style: 'width:22px;height:22px;border-radius:50%;padding:0;cursor:pointer;background:' + (c[1] || '#b0161e') + ';border:' +
+               ((s.scarf || '') === c[1] ? '3px solid #1b1b1f;box-shadow:0 0 0 2px #b8122b' : '2px solid rgba(0,0,0,.25)'),
+        pick: () => this.setState({ scarf: c[1] })
+      })),
+      scarfPick: (e) => {
+        const v = String(e.target.value || '').toLowerCase();
+        if (/^#[0-9a-f]{6}$/.test(v)) this.setState({ scarf: v === '#b0161e' ? '' : v });
+      },""")
 
 # Mods this port has.
 L("""    const MODS = [
@@ -682,7 +1001,6 @@ L("""    const MODS = [
   """    const MODS = [
       ['studio', 'Twilight Orchard intro', 'Our studio\\'s opening before the game starts. Any key or button skips it.'],
       ['intro', 'Skip start-up logos', 'SEGA, Overworks and ADX logos pass in a second each. Start, Cross or Enter during them does the same.'],
-      ['full', 'Fullscreen', 'Borderless fullscreen. In game, Alt+Enter or F11 switches to a window and back.'],
       ['fastvu', 'Fast VU maths', 'A little faster; rare results can differ from the PS2.'],
       ['dbg', 'Debug overlay', 'Show the frame rate in-game.'],
       ['diag', 'Record diagnostics', 'Save a performance profile and sound trace (game/captures).'],
@@ -791,11 +1109,19 @@ L("""      hasToast: !!s.toast,""",
         this.setState(Object.assign({ resOpen: false }, this.defaults));
         this.toastMsg('Defaults restored - save to keep them');
       },
+      // Lighter settings for slower PCs: the game's own resolution, no extra texture filtering, sharpening or
+      // anti-aliasing, PCSX2's lightest blending accuracy; frame rate, widescreen and V-Sync as the defaults.
+      lowEndBtn: () => {
+        this.setState(Object.assign({ resOpen: false }, this.defaults, { res: 'Native', tex: 0, fx: 0, aa: 'Off', blend: 'minimum' }));
+        this.toastMsg('Low-end PC settings - save to keep them');
+      },
 
       hasToast: !!s.toast,""")
 # Game file: state, host messages, dialog, play guard.
 L("""    this.state.restart = !!(init && init.restart);""",
   """    this.state.restart = !!(init && init.restart);
+    // Scarf colour: '' = the original red, else '#rrggbb'.
+    this.state.scarf = (init && init.settings && init.settings.scarf) || '';
     this.state.iso = (init && init.iso) || '';
     this.state.installed = init ? !!init.installed : true;
     this.state.isoMsg = '';
@@ -839,8 +1165,217 @@ L("""openMods: set({ modal: 'mods' }),""",
       browseIso: () => { if (this.host) this.host.postMessage('browseiso'); },
       savesPath: (this.state.savesDir || 'saves'),
       openSaves: () => { if (this.host) this.host.postMessage('opensaves'); },
-      installIso: () => { if (!this.state.iso) { this.toastMsg('Choose your disc image first (Browse...)'); return; } this.setState({ installPct: 0, installFile: '', isoMsg: '' }); if (this.host) this.host.postMessage('installiso'); },""")
+      installIso: () => {
+        if (!this.state.iso) { this.toastMsg('Choose your disc image first (Browse...)'); return; }
+        if (!this.ownedNow()) { this.toastMsg('Tick that you own this copy of the game first'); return; }
+        this.setState({ installPct: 0, installFile: '', isoMsg: '' }); if (this.host) this.host.postMessage('installiso');
+      },
+      owned: this.ownedNow(),
+      openManual: () => { if (this.host) this.host.postMessage('manual'); else this.toastMsg('Launcher host not connected'); },
+      toggleOwned: () => {
+        const owned = !this.ownedNow();
+        try { localStorage.setItem('shinobi.owned', owned ? '1' : '0'); } catch (e) {}
+        this.setState({ ownedTick: owned });
+      },
+      gameSteps: ((done) => [
+        ['Disc image chosen', !!s.iso && s.isoFound],
+        ['Checked: Shinobi (USA, SLUS-20459)', !!s.iso && s.isoFound && !/not|wrong|cannot|could/i.test(s.isoMsg || '')],
+        ['Game files set up', !!s.installed]
+      ].map((st) => ({
+        label: st[0], icon: st[1] ? '\u2713' : '\u25CB',
+        mark: 'display:inline-block;width:18px;text-align:center;font-weight:700;color:' + (st[1] ? '#1f8a3b' : '#9a9aa2'),
+        text: 'font-weight:600;color:' + (st[1] ? '#1b1b1f' : '#7a7a82')
+      })))(),""")
 
+
+# The "I own this copy" tick: remembered, and taken as given once the game files are set up.
+L("""  toastMsg(msg) {""",
+  """  // The game manual as a book: pages drawn from the player's own PDF (game/manual), turned with StPageFlip like the
+  // CS World reader: drag a page by its corner to lift, fold and turn it, or use the arrows, the arrow keys or a swipe.
+  manualLib() {
+    if (window.St && window.St.PageFlip) return Promise.resolve();
+    if (!this._flipLib) this._flipLib = new Promise((res, rej) => {
+      const sc = document.createElement('script'); sc.src = 'page-flip.browser.js';
+      sc.onload = res; sc.onerror = () => { this._flipLib = null; rej(new Error('page-flip.browser.js is missing')); };
+      document.head.appendChild(sc);
+    });
+    return this._flipLib;
+  }
+
+  // One page-turn back, animated like Next (the corner-only rule is lifted for the request).
+  _bookBack(book) {
+    const i = book.getCurrentPageIndex();
+    if (i <= 0) return;
+    const set = book.getSettings();
+    const was = set.disableFlipByClick;
+    set.disableFlipByClick = false;
+    book.flipPrev('top');
+    setTimeout(() => {
+      set.disableFlipByClick = was;
+      // Still not moved (the library refused): no animation, but at least the page turns.
+      if (book.getCurrentPageIndex() === i && book.getState && book.getState() === 'read') book.turnToPage(Math.max(0, i - 2));
+    }, 900);
+  }
+
+  manualClose() {
+    if (this.manualOnly && this._bookEl && !this._manualHiding) { this.manualHide(); return; }
+    this._manualTeardown();
+  }
+
+  // F4 in game: the manual slides down, then the game resumes.
+  manualHide() {
+    if (this._manualHiding) return;
+    this._manualHiding = true;
+    const el = this._bookEl;
+    if (el) { el.style.transition = 'transform .3s cubic-bezier(.5,0,.75,0)'; el.style.transform = 'translateY(100%)'; }
+    setTimeout(() => {
+      this._manualHiding = false;
+      this._manualTeardown();
+      if (this.host) this.host.postMessage('resume');
+    }, el ? 300 : 0);
+  }
+
+  _manualTeardown() {
+    if (this._book) { try { this._book.destroy(); } catch (e) {} this._book = null; }
+    if (this._bookEl) { this._bookEl.remove(); this._bookEl = null; }
+    document.documentElement.classList.remove('manual-open');
+    if (this._bookKeys) { window.removeEventListener('keydown', this._bookKeys, true); this._bookKeys = null; }
+  }
+
+  manualShow(count, base, stamp) {
+    if (!count) { this.toastMsg('The manual has no pages'); return; }
+    this.manualClose();
+    const pad = (n) => String(n).padStart(3, '0');
+    const urls = []; for (let i = 1; i <= count; i++) urls.push(base + pad(i) + '.png' + (stamp ? '?v=' + stamp : ''));
+    const el = document.createElement('div');
+    el.setAttribute('role', 'dialog'); el.setAttribute('aria-label', 'Game manual');
+    // The launcher's title bar is a window drag area (app-region); the manual covers it and must not move the window.
+    el.style.cssText = 'position:fixed;inset:0;z-index:99999;background:rgba(14,14,17,.94);display:flex;flex-direction:column;'
+      + 'font-family:Rajdhani,sans-serif;color:#eee;user-select:none;app-region:no-drag;-webkit-app-region:no-drag';
+    const btn = 'background:#2a2a30;color:#fff;border:1px solid #55555e;border-radius:4px;padding:6px 14px;font:600 14px Rajdhani,sans-serif;'
+      + 'letter-spacing:.06em;text-transform:uppercase;cursor:pointer';
+    if (this.manualOnly) {
+      el.style.transform = 'translateY(100%)';
+      requestAnimationFrame(() => requestAnimationFrame(() => { el.style.transition = 'transform .38s cubic-bezier(.2,.8,.2,1)'; el.style.transform = 'none'; }));
+    }
+    el.innerHTML =
+      '<div style="display:flex;align-items:center;gap:12px;padding:10px 16px;border-bottom:2px solid #b3122a;background:#1b1b1f;'
+      + 'app-region:no-drag;-webkit-app-region:no-drag">'
+      + '<b style="font-size:18px;letter-spacing:.08em;text-transform:uppercase">Shinobi \u2013 Game Manual</b>'
+      + '<span class="mpage" style="margin-left:6px;color:#aaa;font-size:14px"></span><span style="flex:1"></span>'
+      + (this.manualOnly ? '<span style="color:#aaa;font-size:14px;letter-spacing:.06em">F4 TO CLOSE</span>'
+         : '<button class="mpick" style="' + btn + '" title="Use a different PDF">Choose another PDF</button>'
+         + '<button class="mclose" style="' + btn + ';padding:6px 12px" aria-label="Close">\u2715</button>') + '</div>'
+      + '<div class="mstage" style="flex:1;min-height:0;display:flex;align-items:center;justify-content:center;padding:14px 56px;position:relative;overflow:hidden">'
+      + '<div class="mflip" style="width:100%;height:100%"></div>'
+      + '<div class="mzview" style="position:absolute;inset:0;display:none;cursor:grab;z-index:5;overflow:hidden;background:rgba(14,14,17,.98)">'
+      + '<div class="mzimgs" style="position:absolute;left:0;top:0;display:flex;transform-origin:0 0;will-change:transform"></div></div>'
+      + '<div class="mzhint" style="position:absolute;right:14px;bottom:8px;font-size:12px;color:#888;pointer-events:none">'
+      + 'Mouse wheel: zoom \u00b7 Drag a page corner: turn it \u00b7 Double-click: fit</div></div>'
+      + '<div style="display:flex;justify-content:center;gap:14px;padding:10px 0 14px">'
+      + '<button class="mprev" style="' + btn + '">\u2039 Previous</button><button class="mnext" style="' + btn + '">Next \u203A</button></div>';
+    document.body.appendChild(el);
+    document.documentElement.classList.add('manual-open');
+    this._bookEl = el;
+    const pageText = el.querySelector('.mpage');
+    if (el.querySelector('.mclose')) el.querySelector('.mclose').onclick = () => this.manualClose();
+    if (el.querySelector('.mpick')) el.querySelector('.mpick').onclick = () => { this.manualClose(); if (this.host) this.host.postMessage('manualpick'); };
+    this._bookKeys = (e) => {
+      if (!this._book) return;
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); this.manualClose(); }
+      else if (e.key === 'ArrowRight' || e.key === 'PageDown') { e.preventDefault(); e.stopPropagation(); if (this._bookFit) this._bookFit(); this._book.flipNext('top'); }
+      else if (e.key === 'ArrowLeft' || e.key === 'PageUp') { e.preventDefault(); e.stopPropagation(); if (this._bookFit) this._bookFit(); this._bookBack(this._book); }
+    };
+    window.addEventListener('keydown', this._bookKeys, true);
+    const first = new Image();
+    first.onload = () => {
+      this.manualLib().then(() => {
+        if (this._bookEl !== el) return;
+        const ratio = first.naturalWidth / Math.max(1, first.naturalHeight);
+        const host = el.querySelector('.mflip');
+        // The CS World reader's settings: a page turns only when it is dragged (or by the arrows, keys or a swipe).
+        const book = new window.St.PageFlip(host, {
+          width: Math.round(1000 * ratio), height: 1000, size: 'stretch', minWidth: 100, maxWidth: 3000, minHeight: 150, maxHeight: 3000,
+          showCover: true, usePortrait: true, autoSize: true, drawShadow: true, maxShadowOpacity: 0.45, flippingTime: 650,
+          mobileScrollSupport: false, showPageCorners: false, disableFlipByClick: true, swipeDistance: 24, clickEventForward: false
+        });
+        book.loadFromImages(urls);
+        // Zoom with the mouse wheel, about the point under the cursor (1x to 4x). Zoomed in, a still view of the pages
+        // that are open (sharp, from the full-size page images) is shown instead of the book: drag moves it around, only
+        // as far as the pages' own edges, and smaller than the view it stays centred. Zooming back out to 1x (or a
+        // double-click, a turn by button or key) returns to the book.
+        const stage = el.querySelector('.mstage'), zv = el.querySelector('.mzview'), zi = el.querySelector('.mzimgs');
+        const z = { s: 1, x: 0, y: 0, w: 0, h: 0 };
+        const openPages = () => {
+          const i = book.getCurrentPageIndex(), n = urls.length;
+          if (!(book.getOrientation && book.getOrientation() === 'landscape')) return [i];
+          if (i === 0) return [0];
+          const left = i % 2 === 1 ? i : i - 1;
+          return left + 1 < n ? [left, left + 1] : [left];
+        };
+        const layout = () => {
+          // At 1x the still view has the book's size and place: the page images at the stage's inner height.
+          const sr = stage.getBoundingClientRect(), cs = getComputedStyle(stage);
+          const pt = parseFloat(cs.paddingTop) || 0, pb = parseFloat(cs.paddingBottom) || 0;
+          const h = Math.max(50, sr.height - pt - pb), ratio = first.naturalWidth / Math.max(1, first.naturalHeight);
+          zi.querySelectorAll('img').forEach((im) => { im.style.height = h + 'px'; im.style.width = Math.round(h * ratio) + 'px'; });
+          z.w = zi.children.length * Math.round(h * ratio); z.h = h;
+          return { vw: sr.width, vh: sr.height };
+        };
+        const clamp = (v) => {
+          const axis = (pos, size, view) => size <= view ? (view - size) / 2 : Math.min(0, Math.max(view - size, pos));
+          z.x = axis(z.x, z.w * z.s, v.vw);
+          z.y = axis(z.y, z.h * z.s, v.vh);
+        };
+        const apply = () => {
+          if (z.s <= 1) { z.s = 1; zv.style.display = 'none'; zi.innerHTML = ''; return; }
+          if (zv.style.display !== 'block') {
+            zi.innerHTML = openPages().map((k) => '<img draggable="false" alt="" src="' + urls[k] + '" style="display:block;user-select:none">').join('');
+            zv.style.display = 'block';
+          }
+          clamp(layout());
+          zi.style.transform = 'translate(' + z.x + 'px,' + z.y + 'px) scale(' + z.s + ')';
+        };
+        const zoomAt = (cx, cy, next) => {
+          next = Math.max(1, Math.min(4, next));
+          if (next === 1) { z.s = 1; apply(); return; }
+          const r = stage.getBoundingClientRect(), px = cx - r.left, py = cy - r.top;
+          if (z.s === 1) {
+            // starting to zoom: the still view starts exactly where the book is
+            const v = layout(); z.x = (v.vw - z.w) / 2; z.y = (v.vh - z.h) / 2;
+          }
+          z.x = px - (px - z.x) * (next / z.s); z.y = py - (py - z.y) * (next / z.s); z.s = next; apply();
+        };
+        stage.addEventListener('wheel', (e) => { e.preventDefault(); zoomAt(e.clientX, e.clientY, z.s * (e.deltaY < 0 ? 1.15 : 1 / 1.15)); }, { passive: false });
+        stage.addEventListener('dblclick', () => { z.s = 1; apply(); });
+        let drag = null;
+        zv.addEventListener('pointerdown', (e) => { drag = { x: e.clientX - z.x, y: e.clientY - z.y }; try { zv.setPointerCapture(e.pointerId); } catch (_) {} zv.style.cursor = 'grabbing'; });
+        zv.addEventListener('pointermove', (e) => { if (!drag) return; z.x = e.clientX - drag.x; z.y = e.clientY - drag.y; apply(); });
+        const end = () => { drag = null; zv.style.cursor = 'grab'; };
+        zv.addEventListener('pointerup', end); zv.addEventListener('pointercancel', end);
+        window.addEventListener('resize', () => { if (z.s > 1) apply(); });
+        // Turning a page with the buttons or keys goes back to the book first, so the turn is seen whole.
+        const fit = () => { if (z.s !== 1) { z.s = 1; apply(); } };
+        this._bookFit = fit;
+        const show = () => { const i = book.getCurrentPageIndex(); pageText.textContent = 'Page ' + (i + 1) + ' of ' + count; };
+        book.on('flip', show); show();
+        el.querySelector('.mprev').onclick = () => { fit(); this._bookBack(book); };
+        el.querySelector('.mnext').onclick = () => { fit(); book.flipNext('top'); };
+        this._book = book; window.__manualBook = book;
+      }).catch((e) => { this.toastMsg(String(e && e.message || e)); this.manualClose(); });
+    };
+    first.onerror = () => { this.toastMsg('The manual pages could not be loaded'); this.manualClose(); };
+    first.src = urls[0];
+  }
+
+  ownedNow() {
+    if (typeof this.state.ownedTick === 'boolean') return this.state.ownedTick;
+    let stored = null;
+    try { stored = localStorage.getItem('shinobi.owned'); } catch (e) {}
+    return stored === '1' || (stored === null && !!this.state.installed);
+  }
+
+  toastMsg(msg) {""")
 
 # Camera (the pad's right stick) on the keyboard: four more rows in Configure Controller, defaults I K J L.
 L("""['start', 'Start', 'Menu'], ['select', 'Select', 'View']];""",
@@ -860,6 +1395,68 @@ if PUBLIC:
 
 # The Mod Menu's footer button opens the game folder.
 template = must_replace(template, '<span class="lab">Open Mods Folder</span>', '<span class="lab">Open Game Folder</span>')
+
+
+
+
+# ---- LOCAL PATCH: tabs, window mode, haptics (page state, saving, bindings) ----
+L("""blend: 'basic' };
+    this.defBinds""", """blend: 'basic', win: 'borderless', haptics: true, hapStr: 10, trig: true };
+    this.defBinds""")
+L("""      resOpen: false, modal: null, guide: 0,
+      launch: 'idle'""", """      resOpen: false, winOpen: false, tab: 'display', modal: null, guide: 0,
+      launch: 'idle'""")
+L("""blend: s.blend, scarf: s.scarf || '', bind: s.bind, mods: s.mods });""",
+  """blend: s.blend, scarf: s.scarf || '', win: s.win, haptics: s.haptics, hapStr: s.hapStr, trig: s.trig, bind: s.bind, mods: s.mods });""")
+L("""    add('scarf', s.scarf || 'original');""", """    add('scarf', s.scarf || 'original');
+    add('win', s.win || 'borderless'); add('haptics', s.haptics ? 1 : 0); add('hapStr', s.hapStr || 10); add('trig', s.trig ? 1 : 0);""")
+L("""      setTex: (e) => this.setState({ tex: Number(e.target.value) }),""",
+  """      setTex: (e) => this.setState({ tex: Number(e.target.value) }),
+      tabOpts: [['display', 'Display'], ['graphics', 'Graphics'], ['controller', 'Controller']].map((t) => ({ name: t[1], on: s.tab === t[0], cls: s.tab === t[0] ? 'on' : '', pick: () => { document.documentElement.classList.add('tabbed'); this.setState({ tab: t[0], resOpen: false, winOpen: false }); } })),
+      tabDisplay: s.tab === 'display',
+      tabGraphics: s.tab === 'graphics',
+      tabController: s.tab === 'controller',
+      winOpen: s.winOpen,
+      winLabel: ({ windowed: 'Windowed', borderless: 'Borderless Fullscreen', fullscreen: 'Exclusive Fullscreen' })[s.win || 'borderless'],
+      toggleWin: () => this.setState({ winOpen: !this.state.winOpen, resOpen: false }),
+      closeWin: () => this.setState({ winOpen: false }),
+      winOptions: [['borderless', 'Borderless Fullscreen', 'fills the screen, quick to alt-tab'], ['fullscreen', 'Exclusive Fullscreen', 'the screen is the game\\'s alone'], ['windowed', 'Windowed', 'a window you can move and resize']].map((w) => ({ name: w[1], sub: w[2], on: (s.win || 'borderless') === w[0], cls: (s.win || 'borderless') === w[0] ? 'on' : '', pick: () => this.setState({ win: w[0], winOpen: false }) })),
+      haptics: s.haptics !== false,
+      toggleHaptics: () => this.setState({ haptics: !(this.state.haptics !== false) }),
+      hapStr: s.hapStr || 10,
+      hapStrName: ((s.hapStr || 10) * 10) + '%',
+      hapStrBg: fill(((s.hapStr || 10) - 1) / 9 * 4),
+      setHapStr: (e) => this.setState({ hapStr: Number(e.target.value) }),
+      trig: s.trig !== false,
+      toggleTrig: () => this.setState({ trig: !(this.state.trig !== false) }),""")
+
+
+# ---- LOCAL PATCH: Effects tab state, saving and bindings ----
+L("""win: 'borderless', haptics: true, hapStr: 10, trig: true };""",
+  """win: 'borderless', haptics: true, hapStr: 10, trig: true, texf: 'ps2', scrf: 'smooth', dith: true, mip: true, upfix: true, ovl: false, cam: false };""")
+L("""win: s.win, haptics: s.haptics, hapStr: s.hapStr, trig: s.trig, bind: s.bind""",
+  """win: s.win, haptics: s.haptics, hapStr: s.hapStr, trig: s.trig, texf: s.texf, scrf: s.scrf, dith: s.dith, mip: s.mip, upfix: s.upfix, ovl: s.ovl, cam: s.cam, bind: s.bind""")
+L("""add('trig', s.trig ? 1 : 0);""",
+  """add('trig', s.trig ? 1 : 0);
+    add('texf', s.texf || 'ps2'); add('scrf', s.scrf || 'smooth'); add('dith', s.dith !== false ? 1 : 0); add('mip', s.mip !== false ? 1 : 0); add('upfix', s.upfix !== false ? 1 : 0); add('ovl', s.ovl ? 1 : 0); add('cam', s.cam ? 1 : 0);""")
+L("""[['display', 'Display'], ['graphics', 'Graphics'], ['controller', 'Controller']]""",
+  """[['display', 'Display'], ['graphics', 'Graphics'], ['effects', 'Effects'], ['controller', 'Controller']]""")
+L("""      tabController: s.tab === 'controller',""",
+  """      tabController: s.tab === 'controller',
+      tabEffects: s.tab === 'effects',
+      blendOpts: [['minimum', 'Min'], ['basic', 'Basic'], ['medium', 'Medium'], ['high', 'High']].map((o) => ({ name: o[1], on: (s.blend || 'basic') === o[0], cls: (s.blend || 'basic') === o[0] ? 'on' : '', pick: () => this.setState({ blend: o[0] }) })),
+      texfOpts: [['ps2', 'As on PS2'], ['bilinear', 'Bilinear']].map((o) => ({ name: o[1], on: (s.texf || 'ps2') === o[0], cls: (s.texf || 'ps2') === o[0] ? 'on' : '', pick: () => this.setState({ texf: o[0] }) })),
+      scrfOpts: [['sharp', 'Sharp'], ['smooth', 'Smooth'], ['scanlines', 'Scanlines'], ['crt', 'CRT']].map((o) => ({ name: o[1], on: (s.scrf || 'smooth') === o[0], cls: (s.scrf || 'smooth') === o[0] ? 'on' : '', pick: () => this.setState({ scrf: o[0] }) })),
+      dith: s.dith !== false,
+      toggleDith: () => this.setState({ dith: !(this.state.dith !== false) }),
+      mip: s.mip !== false,
+      toggleMip: () => this.setState({ mip: !(this.state.mip !== false) }),
+      upfix: s.upfix !== false,
+      toggleUpfix: () => this.setState({ upfix: !(this.state.upfix !== false) }),
+      ovl: !!s.ovl,
+      toggleOvl: () => this.setState({ ovl: !this.state.ovl }),
+      cam: !!s.cam,
+      toggleCam: () => this.setState({ cam: !this.state.cam }),""")
 
 template = template[:logic_start] + logic + template[logic_end:]
 set_block('manifest', json.dumps(manifest, separators=(',', ':')))

@@ -274,6 +274,12 @@ private:
     const ps2x::vu1c::Program *m_compiledProgram = nullptr;
     uint64_t m_compiledGeneration = ~0ull;
     std::unique_ptr<ps2x::vu1c::Exec> m_compiledExec;
+
+public:
+    // LOCAL PATCH: the state of the last translated run on this thread (the VU1 bench's read-set check reads it).
+    const ps2x::vu1c::Exec *lastCompiledExec() const { return m_compiledExec.get(); }
+
+private:
     std::unique_ptr<CompiledVerification> m_compiledVerification;
     std::vector<uint8_t> *m_gifCapture = nullptr;
 

@@ -2478,6 +2478,7 @@ void VU1Interpreter::exportCompiledState(ps2x::vu1c::Exec &x, uint8_t *vuData, u
     // LOCAL PATCH: nothing reads the read/write sets of a run on this thread (only the parallel workers' runs are checked
     // against them), so skip the bookkeeping and the clear (see Exec::trackMem).
     x.trackMem = false;
+    x.trackRegs = false; // LOCAL PATCH (dynamic inputs): only speculative worker runs record their reads
 }
 
 void VU1Interpreter::importCompiledState(const ps2x::vu1c::Exec &x)
@@ -2607,6 +2608,11 @@ void VU1Interpreter::importCompiledState(const ps2x::vu1c::Exec &x)
     }
 }
 
+namespace ps2x::vu1c
+{
+    bool g_vu1TrackTest = false;
+}
+
 bool VU1Interpreter::runCompiled(const ps2x::vu1c::Program &program, uint8_t *vuData, uint32_t dataSize,
                                  uint64_t budgetEnd, std::vector<uint8_t> *gifCapture)
 {
@@ -2614,6 +2620,11 @@ bool VU1Interpreter::runCompiled(const ps2x::vu1c::Program &program, uint8_t *vu
         m_compiledExec = std::make_unique<ps2x::vu1c::Exec>();
     ps2x::vu1c::Exec &x = *m_compiledExec;
     exportCompiledState(x, vuData, dataSize, budgetEnd);
+    if (ps2x::vu1c::g_vu1TrackTest)
+    {
+        x.trackRegs = true;
+        x.clearRegSets();
+    }
     if (gifCapture)
     {
         x.submitGif = captureGifPacket;

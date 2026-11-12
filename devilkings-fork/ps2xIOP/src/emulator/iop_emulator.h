@@ -25,6 +25,8 @@ namespace ps2x::iop::detail
         [[nodiscard]] ModuleLoadResult loadModuleBuffer(uint32_t guestAddress, const void *arguments, uint32_t argumentSize);
         [[nodiscard]] bool stopModule(int32_t moduleId, int32_t *result);
         void runEeCycles(uint64_t eeCycles) noexcept;
+        void setDeferral(uint64_t minBatchCycles, uint64_t budgetNanoseconds, uint64_t maxDeferredCycles) noexcept;
+        void idleFlush() noexcept;
         [[nodiscard]] RpcResult handleRpc(const RpcRequest &request);
         [[nodiscard]] bool hasRpcServer(uint32_t sid) const noexcept;
         void onSifTransfer(const SifTransfer &transfer);

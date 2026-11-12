@@ -1318,12 +1318,15 @@ extern "C" RrvPcsx2GsBridge* rrv_pcsx2_gs_bridge_create(
         // 0 departs from hardware (the guest's MIPMAP/TEX1 levels are ignored).
         if (const char* value = std::getenv("RRV_PCSX2_GS_FULL_SCALE"); value && value[0] != '\0')
         {
-            if (value[0] < '1' || value[0] > '8' || value[1] != '\0')
+            // LOCAL PATCH (Shinobi): up to 12 (8K, 7680x5376), PCSX2's own highest upscale.
+            char* end = nullptr;
+            const long parsed_scale = std::strtol(value, &end, 10);
+            if (!end || *end != '\0' || parsed_scale < 1 || parsed_scale > 12)
             {
-                SetError(error, error_capacity, "invalid RRV_PCSX2_GS_FULL_SCALE=%s (expected 1..8)", value);
+                SetError(error, error_capacity, "invalid RRV_PCSX2_GS_FULL_SCALE=%s (expected 1..12)", value);
                 return nullptr;
             }
-            options.UpscaleMultiplier = static_cast<float>(value[0] - '0');
+            options.UpscaleMultiplier = static_cast<float>(parsed_scale);
             std::fprintf(stderr, "[pcsx2-gs-bridge] render mode=full: UpscaleMultiplier=%s%s\n", value,
                          value[0] == '1' ? " [diagnostic override]" : "");
         }
@@ -1542,6 +1545,11 @@ extern "C" RrvPcsx2GsBridge* rrv_pcsx2_gs_bridge_create(
             options.UserHacks_HalfPixelOffset = static_cast<GSHalfPixelOffset>(parsed);
             fixes_overridden = true;
         }
+        // LOCAL PATCH (Shinobi): "Upscaling fixes" off in the settings sets RRV_PCSX2_GS_FULL_HPO=0; round sprite goes off
+        // with it unless asked for.
+        if (const char* hpo = std::getenv("RRV_PCSX2_GS_FULL_HPO");
+            hpo && std::strcmp(hpo, "0") == 0 && !std::getenv("RRV_PCSX2_GS_FULL_ROUND_SPRITE"))
+            options.UserHacks_RoundSprite = 0;
         if (const char* value = std::getenv("RRV_PCSX2_GS_FULL_ROUND_SPRITE"); value && value[0] != '\0')
         {
             if ((value[0] < '0' || value[0] > '2') || value[1] != '\0')
@@ -1850,6 +1858,27 @@ extern "C" RrvPcsx2GsBridge* rrv_pcsx2_gs_bridge_create(
         options.MaxAnisotropy = static_cast<u8>(std::atoi(aniso));
         std::fprintf(stderr, "[pcsx2-gs-bridge] anisotropic filtering=%ux\n",
                      static_cast<unsigned>(options.MaxAnisotropy));
+    }
+    // LOCAL PATCH (Shinobi, low-end GPUs): RRV_PCSX2_GS_BLENDING=0..3, PCSX2's blending accuracy (Minimum, Basic,
+    // Medium, High). Basic (1) is PCSX2's default and stays the default here; Minimum skips the extra shader blending
+    // passes for slower graphics cards. A host setting like RRV_PCSX2_GS_ANISO, never set for oracle work.
+    if (const char* blend = std::getenv("RRV_PCSX2_GS_BLENDING"); blend && blend[0] != '\0')
+    {
+        if (blend[0] < '0' || blend[0] > '3' || blend[1] != '\0')
+        {
+            SetError(error, error_capacity, "RRV_PCSX2_GS_BLENDING must be 0..3, got %s", blend);
+            return nullptr;
+        }
+        options.AccurateBlendingUnit = static_cast<AccBlendLevel>(blend[0] - '0');
+        std::fprintf(stderr, "[pcsx2-gs-bridge] blending accuracy=%c\n", blend[0]);
+    }
+    // LOCAL PATCH (Shinobi): RRV_PCSX2_GS_DITHERING=0|1|2, PCSX2's dithering (Off, Scaled, Unscaled = the default).
+    // Off removes the PS2's grainy colour pattern.
+    if (const char* dither = std::getenv("RRV_PCSX2_GS_DITHERING");
+        dither && dither[0] >= '0' && dither[0] <= '2' && dither[1] == '\0')
+    {
+        options.Dithering = static_cast<u8>(dither[0] - '0');
+        std::fprintf(stderr, "[pcsx2-gs-bridge] dithering=%c\n", dither[0]);
     }
     // RRV_PCSX2_GS_TEXTURE_FILTER=ps2|bilinear: ps2 (default) filters each draw as
     // its TEX1 asks. bilinear is PCSX2's "Bilinear (Forced excluding sprite)"
@@ -2962,6 +2991,60 @@ extern "C" int rrv_pcsx2_gs_bridge_submit(
                                     static_cast<uint32_t>(rrv::pcsx2::receipt::EventType::Transfer),
                                     true);
 #endif
+    return 1;
+}
+
+// LOCAL PATCH (Shinobi, settings without a restart): re-reads the renderer options that rrv_pcsx2_gs_bridge_create
+// takes from RRV_PCSX2_GS_FULL_SCALE (full-frame mode), RRV_PCSX2_GS_ANISO, RRV_PCSX2_GS_TEXTURE_FILTER,
+// RRV_PCSX2_GS_FULL_HWAA1 and RRV_PCSX2_GS_BLENDING, and hands them to the running renderer with PCSX2's own
+// GSUpdateConfig (what PCSX2 does when its settings change while a game runs: a new upscale rebuilds the render targets
+// at the next draw; the rest only changes shaders). Every other option stays as it is. On the bridge's GS thread.
+extern "C" int rrv_pcsx2_gs_bridge_update_options(
+    RrvPcsx2GsBridge* bridge, char* error, uint32_t error_capacity)
+{
+    if (!bridge || !bridge->open)
+    {
+        SetError(error, error_capacity, "PCSX2 GS bridge is not open for an options update");
+        return 0;
+    }
+    Pcsx2Config::GSOptions options = GSConfig;
+    if (bridge->full_frame)
+    {
+        if (const char* value = std::getenv("RRV_PCSX2_GS_FULL_SCALE"); value && value[0] != '\0')
+        {
+            char* end = nullptr;
+            const long scale = std::strtol(value, &end, 10);
+            if (end && *end == '\0' && scale >= 1 && scale <= 12)
+                options.UpscaleMultiplier = static_cast<float>(scale);
+        }
+        if (const char* value = std::getenv("RRV_PCSX2_GS_FULL_HWAA1"); value && (value[0] == '0' || value[0] == '1'))
+            options.HWAA1 = value[0] == '1';
+    }
+    if (const char* aniso = std::getenv("RRV_PCSX2_GS_ANISO"))
+    {
+        const int value = aniso[0] ? std::atoi(aniso) : 0;
+        if (value == 0 || value == 2 || value == 4 || value == 8 || value == 16)
+            options.MaxAnisotropy = static_cast<u8>(value);
+    }
+    else
+        options.MaxAnisotropy = 0;
+    if (const char* filter = std::getenv("RRV_PCSX2_GS_TEXTURE_FILTER"); filter && std::string_view(filter) == "bilinear")
+        options.TextureFiltering = BiFiltering::Forced_But_Sprite;
+    else
+        options.TextureFiltering = BiFiltering::PS2;
+    if (const char* blend = std::getenv("RRV_PCSX2_GS_BLENDING"); blend && blend[0] >= '0' && blend[0] <= '3' && blend[1] == '\0')
+        options.AccurateBlendingUnit = static_cast<AccBlendLevel>(blend[0] - '0');
+    const ScopedBridgeGsFpcr fpcr_guard(bridge->fp_isolated);
+    GSUpdateConfig(options);
+    EmuConfig.GS.UpscaleMultiplier = options.UpscaleMultiplier;
+    EmuConfig.GS.MaxAnisotropy = options.MaxAnisotropy;
+    EmuConfig.GS.TextureFiltering = options.TextureFiltering;
+    EmuConfig.GS.HWAA1 = options.HWAA1;
+    EmuConfig.GS.AccurateBlendingUnit = options.AccurateBlendingUnit;
+    std::fprintf(stderr, "[pcsx2-gs-bridge] options updated: scale=%g aniso=%u filter=%d hwaa1=%d blending=%d" "\n",
+                 static_cast<double>(options.UpscaleMultiplier), static_cast<unsigned>(options.MaxAnisotropy),
+                 static_cast<int>(options.TextureFiltering), options.HWAA1 ? 1 : 0,
+                 static_cast<int>(options.AccurateBlendingUnit));
     return 1;
 }
 

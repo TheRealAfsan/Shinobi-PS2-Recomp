@@ -16,6 +16,18 @@ extern std::atomic<bool> g_ps2MouseLookActive; // Pad.cpp, set by the window loo
 extern std::atomic<float> g_ps2MouseStickX;
 extern std::atomic<float> g_ps2MouseStickY;
 
+// LOCAL PATCH (DualSense): src/lib/ps2_dualsense.cpp
+struct Ps2xDualSenseInput
+{
+    uint8_t lx, ly, rx, ry;
+    uint8_t l2, r2;
+    uint8_t hat;
+    bool square, cross, circle, triangle, l1, r1, l2Button, r2Button, create, options, l3, r3, ps;
+};
+bool ps2xDualSenseRead(Ps2xDualSenseInput &out);
+// LOCAL PATCH (haptics trace): src/lib/ps2_haptics_trace.cpp
+void ps2xHapticTraceL2(int pad, int value, bool down);
+
 namespace
 {
     constexpr uint8_t kPadAnalogMarker = 0x73;
@@ -122,43 +134,112 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
 
     if (useGamepad)
     {
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_FACE_UP))
-            clearBit(PAD_UP);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_FACE_DOWN))
-            clearBit(PAD_DOWN);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_FACE_LEFT))
-            clearBit(PAD_LEFT);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_FACE_RIGHT))
-            clearBit(PAD_RIGHT);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_FACE_DOWN))
-            clearBit(PAD_CROSS);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT))
-            clearBit(PAD_CIRCLE);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_FACE_LEFT))
-            clearBit(PAD_SQUARE);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_FACE_UP))
-            clearBit(PAD_TRIANGLE);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_TRIGGER_1))
-            clearBit(PAD_L1);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_TRIGGER_1))
-            clearBit(PAD_R1);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_TRIGGER_2))
-            clearBit(PAD_L2);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_TRIGGER_2))
-            clearBit(PAD_R2);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_MIDDLE_RIGHT))
-            clearBit(PAD_START);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_MIDDLE_LEFT))
-            clearBit(PAD_SELECT);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_THUMB))
-            clearBit(PAD_L3);
-        if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_THUMB))
-            clearBit(PAD_R3);
-
-        float lx = GetGamepadAxisMovement(kGamepad, GAMEPAD_AXIS_LEFT_X);
-        float ly = GetGamepadAxisMovement(kGamepad, GAMEPAD_AXIS_LEFT_Y);
-        float rx = GetGamepadAxisMovement(kGamepad, GAMEPAD_AXIS_RIGHT_X);
-        float ry = GetGamepadAxisMovement(kGamepad, GAMEPAD_AXIS_RIGHT_Y);
+        // LOCAL PATCH: every connected controller is read, not only the chosen one. Steam Input, the EA app and similar tools
+        // can take the real DualSense / Xbox pad and hand its input to a virtual controller with another number, so the pad
+        // the scan picked sees nothing. Buttons from all of them count; each stick takes the one pushed furthest.
+        // Wheels, shifters and pedals stay out (they report gamepad axes of their own).
+        static std::vector<int> s_pads;
+        if (rescan)
+        {
+            s_pads.clear();
+            for (int i = 0; i < 4; ++i)
+            {
+                if (!IsGamepadAvailable(i))
+                    continue;
+                std::string lower(GetGamepadName(i) ? GetGamepadName(i) : "");
+                std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                if (lower.find("shifter") == std::string::npos && lower.find("wheel") == std::string::npos &&
+                    lower.find("pedal") == std::string::npos && lower.find("throttle") == std::string::npos)
+                    s_pads.push_back(i);
+            }
+            if (s_pads.empty())
+                s_pads.push_back(kGamepad);
+            static size_t s_loggedCount = 0u;
+            if (s_pads.size() != s_loggedCount)
+            {
+                s_loggedCount = s_pads.size();
+                std::fprintf(stderr, "[pad] reading %zu controller(s):", s_pads.size());
+                for (int i : s_pads)
+                    std::fprintf(stderr, " %d (%s)", i, GetGamepadName(i) ? GetGamepadName(i) : "?");
+                std::fputc('\n', stderr);
+            }
+        }
+        static const std::pair<int, uint16_t> kButtons[] = {
+            {GAMEPAD_BUTTON_LEFT_FACE_UP, PAD_UP},         {GAMEPAD_BUTTON_LEFT_FACE_DOWN, PAD_DOWN},
+            {GAMEPAD_BUTTON_LEFT_FACE_LEFT, PAD_LEFT},     {GAMEPAD_BUTTON_LEFT_FACE_RIGHT, PAD_RIGHT},
+            {GAMEPAD_BUTTON_RIGHT_FACE_DOWN, PAD_CROSS},   {GAMEPAD_BUTTON_RIGHT_FACE_RIGHT, PAD_CIRCLE},
+            {GAMEPAD_BUTTON_RIGHT_FACE_LEFT, PAD_SQUARE},  {GAMEPAD_BUTTON_RIGHT_FACE_UP, PAD_TRIANGLE},
+            {GAMEPAD_BUTTON_LEFT_TRIGGER_1, PAD_L1},       {GAMEPAD_BUTTON_RIGHT_TRIGGER_1, PAD_R1},
+            {GAMEPAD_BUTTON_LEFT_TRIGGER_2, PAD_L2},       {GAMEPAD_BUTTON_RIGHT_TRIGGER_2, PAD_R2},
+            {GAMEPAD_BUTTON_MIDDLE_RIGHT, PAD_START},      {GAMEPAD_BUTTON_MIDDLE_LEFT, PAD_SELECT},
+            {GAMEPAD_BUTTON_LEFT_THUMB, PAD_L3},           {GAMEPAD_BUTTON_RIGHT_THUMB, PAD_R3}};
+        float lx = 0.0f, ly = 0.0f, rx = 0.0f, ry = 0.0f;
+        for (int pad : s_pads)
+        {
+            for (const auto &[button, bit] : kButtons)
+                if (IsGamepadButtonDown(pad, button))
+                    clearBit(bit);
+            {
+                // LOCAL PATCH (haptics trace): how far L2 is pressed (raylib: -1 released .. 1 fully in).
+                const float l2 = GetGamepadAxisMovement(pad, GAMEPAD_AXIS_LEFT_TRIGGER);
+                ::ps2xHapticTraceL2(pad, static_cast<int>(std::clamp((l2 + 1.0f) * 127.5f, 0.0f, 255.0f)),
+                                  IsGamepadButtonDown(pad, GAMEPAD_BUTTON_LEFT_TRIGGER_2));
+            }
+            const float plx = GetGamepadAxisMovement(pad, GAMEPAD_AXIS_LEFT_X), ply = GetGamepadAxisMovement(pad, GAMEPAD_AXIS_LEFT_Y);
+            const float prx = GetGamepadAxisMovement(pad, GAMEPAD_AXIS_RIGHT_X), pry = GetGamepadAxisMovement(pad, GAMEPAD_AXIS_RIGHT_Y);
+            if (plx * plx + ply * ply > lx * lx + ly * ly)
+            {
+                lx = plx;
+                ly = ply;
+            }
+            if (prx * prx + pry * pry > rx * rx + ry * ry)
+            {
+                rx = prx;
+                ry = pry;
+            }
+        }
+        // LOCAL PATCH: a DualSense read directly (ps2_dualsense.cpp, for haptics): its buttons and sticks count too. Over
+        // Bluetooth the usual controller APIs stop seeing it once haptics start, so this keeps it working.
+        {
+            Ps2xDualSenseInput ds{};
+            if (::ps2xDualSenseRead(ds))
+            {
+                const bool hatUp = ds.hat == 7 || ds.hat == 0 || ds.hat == 1;
+                const bool hatRight = ds.hat >= 1 && ds.hat <= 3;
+                const bool hatDown = ds.hat >= 3 && ds.hat <= 5;
+                const bool hatLeft = ds.hat >= 5 && ds.hat <= 7;
+                const std::pair<bool, uint16_t> pressed[] = {
+                    {hatUp, PAD_UP},         {hatDown, PAD_DOWN},       {hatLeft, PAD_LEFT},     {hatRight, PAD_RIGHT},
+                    {ds.cross, PAD_CROSS},   {ds.circle, PAD_CIRCLE},   {ds.square, PAD_SQUARE}, {ds.triangle, PAD_TRIANGLE},
+                    {ds.l1, PAD_L1},         {ds.r1, PAD_R1},           {ds.l2Button, PAD_L2},   {ds.r2Button, PAD_R2},
+                    {ds.options, PAD_START}, {ds.create, PAD_SELECT},   {ds.l3, PAD_L3},         {ds.r3, PAD_R3}};
+                for (const auto &[down, bit] : pressed)
+                    if (down)
+                        clearBit(bit);
+                // LOCAL PATCH: with the L2 trigger resistance on, L2 counts as pressed only past the stiff part (the
+                // effect gives way at about 70% of its travel): a light touch no longer fires the ninja magic. The
+                // controller's own L2 bit (set at a light touch, here or through the usual APIs) is overridden.
+                if (ps2x::settings::getBool("input", "trigger_resistance"))
+                {
+                    if (ds.l2 >= 190)
+                        clearBit(PAD_L2);
+                    else
+                        btns |= PAD_L2;
+                }
+                const float dlx = (ds.lx - 127.5f) / 127.5f, dly = (ds.ly - 127.5f) / 127.5f;
+                const float drx = (ds.rx - 127.5f) / 127.5f, dry = (ds.ry - 127.5f) / 127.5f;
+                if (dlx * dlx + dly * dly > lx * lx + ly * ly)
+                {
+                    lx = dlx;
+                    ly = dly;
+                }
+                if (drx * drx + dry * dry > rx * rx + ry * ry)
+                {
+                    rx = drx;
+                    ry = dry;
+                }
+            }
+        }
         // LOCAL PATCH: a round dead zone ([input] stick_deadzone, % of the stick's travel, 15 by default): an analog stick
         // that rests slightly off centre (a worn or drifting DualSense / Xbox pad) would otherwise walk the character or
         // turn the camera on its own. Outside it the stick is stretched to its full range.

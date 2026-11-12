@@ -346,6 +346,45 @@ bool VU1Interpreter::Parallel::inputsMatch(const Slot &slot) const
     const ps2x::vu1c::EntryInputs &in = *slot.inputs;
     const VU1State &now = vu.m_state;
     const VU1State &then = slot.input;
+    if ((in.other & ps2x::vu1c::kInputDynamic) != 0u)
+    {
+        // LOCAL PATCH (dynamic inputs): the registers and flags this very run read before writing them
+        // (Exec::trackRegs). Same values as the runs ahead left = the same run.
+        const ps2x::vu1c::Exec &x = slot.exec;
+        for (uint32_t reg = 1; reg < 16u; ++reg)
+        {
+            if ((x.rdVi >> reg) & 1u && now.vi[reg] != then.vi[reg])
+                return false;
+        }
+        for (uint32_t half = 0; half < 2u; ++half)
+        {
+            uint64_t bits = x.rdVf[half];
+            while (bits != 0u)
+            {
+                const uint32_t index = half * 64u + lowestBit(bits);
+                bits &= bits - 1u;
+                const uint32_t reg = index / 4u, component = index % 4u;
+                if (reg != 0u && floatBits(now.vf[reg][component]) != floatBits(then.vf[reg][component]))
+                    return false;
+            }
+        }
+        for (uint32_t component = 0; component < 4u; ++component)
+        {
+            if ((x.rdAcc >> component) & 1u && floatBits(now.acc[component]) != floatBits(then.acc[component]))
+                return false;
+        }
+        if ((x.rdAcc & 16u) != 0u && floatBits(now.i) != floatBits(then.i))
+            return false;
+        if ((x.rdOther & ps2x::vu1c::kInputQ) != 0u && floatBits(now.q) != floatBits(then.q))
+            return false;
+        if ((x.rdOther & ps2x::vu1c::kInputMac) != 0u && now.mac != then.mac)
+            return false;
+        if ((x.rdOther & ps2x::vu1c::kInputStatus) != 0u && now.status != then.status)
+            return false;
+        if ((x.rdOther & ps2x::vu1c::kInputP) != 0u && floatBits(now.p) != floatBits(then.p))
+            return false;
+        return ((now.clip ^ then.clip) & x.rdClip) == 0u;
+    }
     for (uint32_t reg = 1; reg < 16u; ++reg)
     {
         if ((in.vi >> reg) & 1u && now.vi[reg] != then.vi[reg])
@@ -614,6 +653,12 @@ void VU1Interpreter::Parallel::merge(Slot &slot)
             s.i = x.i;
         if ((x.effects & ps2x::vu1c::kEffectMac) != 0u)
             s.mac = x.mac;
+        // LOCAL PATCH (dynamic inputs): P written by this run (an ended run has landed all of its EFU results), and
+        // when the EFU unit takes its next instruction.
+        if (x.pLanded)
+            s.p = x.p;
+        if (x.efuResource > start)
+            v.m_efuResourceReady = x.efuResource - start + base;
         if ((slot.inputs->other & ps2x::vu1c::kInputStatus) != 0u)
         {
             s.status = x.status; // started from these very bits
@@ -907,6 +952,7 @@ void VU1Interpreter::Parallel::prepare(Slot &slot, bool mscal, uint32_t entryPc,
     std::memcpy(x.vi, in.vi, sizeof(x.vi));
     std::memcpy(x.acc, in.acc, sizeof(x.acc));
     x.q = in.q;
+    x.p = in.p;
     x.i = in.i;
     x.mac = in.mac;
     x.status = in.status;
@@ -961,6 +1007,14 @@ void VU1Interpreter::Parallel::prepare(Slot &slot, bool mscal, uint32_t entryPc,
     x.clipWrites = 0u;
     x.trackMem = true; // speculative run: its read/write sets are checked before it is merged
     x.clearMemSets();
+    // LOCAL PATCH (dynamic inputs): EFU unit as exportCompiledState leaves it (no result in flight when a run starts),
+    // and the register read/write sets for a program that records them.
+    x.efuValid[0] = x.efuValid[1] = false;
+    x.efuReady[0] = x.efuReady[1] = 0u;
+    x.efuValue[0] = x.efuValue[1] = 0.0f;
+    x.efuResource = mscal ? 0u : v.m_efuResourceReady;
+    x.trackRegs = !exact && slot.inputs && (slot.inputs->other & ps2x::vu1c::kInputDynamic) != 0u;
+    x.clearRegSets();
     slot.gif.clear();
     slot.gifSizes.clear();
     slot.errors = 0u;

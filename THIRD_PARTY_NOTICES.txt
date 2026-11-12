@@ -15,6 +15,10 @@ PCSX2 (graphics and sound code)
     third_party/pcsx2-gs-bridge is the bridge that lets this program use PCSX2's
     graphics core (GPL-3.0-or-later; see its own README.md and PINNED_REVISION).
 
+StPageFlip (page-turning in the launcher's manual) - MIT licence - Nodlik
+    https://github.com/Nodlik/StPageFlip - launcher_assets/page-flip.browser.js,
+    licence text in launcher_assets/PAGE-FLIP-LICENSE.txt.
+
 raylib - zlib licence - Ramon Santamaria (raysan5) and contributors
     https://www.raylib.com
 

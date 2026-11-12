@@ -19,6 +19,9 @@
 #include <windows.h>
 #include <mmsystem.h>
 #include <psapi.h>
+#include <pdh.h>
+#include <pdhmsg.h>
+#pragma comment(lib, "pdh.lib")
 #include <tlhelp32.h>
 #include <dxgi1_4.h>
 #include <dbghelp.h>
@@ -182,6 +185,47 @@ namespace
 {
     // The expensive part of the stats line: a system-wide thread snapshot plus a query per thread (topThreads) and a DXGI
     // video-memory query. Run by the "Stats" thread only (see summary()).
+    // LOCAL PATCH (performance overlay): this process's share of the GPU's 3D engines, from the "GPU Engine" counters
+    // Task Manager uses (summed over this process's 3D engine instances). -1 when the counters are unavailable.
+    double processGpuPercent()
+    {
+        static PDH_HQUERY s_query = nullptr;
+        static PDH_HCOUNTER s_counter = nullptr;
+        static bool s_failed = false;
+        if (s_failed)
+            return -1.0;
+        if (!s_query)
+        {
+            if (PdhOpenQueryW(nullptr, 0, &s_query) != ERROR_SUCCESS ||
+                PdhAddEnglishCounterW(s_query, L"\\GPU Engine(*)\\Utilization Percentage", 0, &s_counter) != ERROR_SUCCESS)
+            {
+                s_failed = true;
+                return -1.0;
+            }
+            PdhCollectQueryData(s_query);
+            return -1.0; // a rate needs two samples
+        }
+        if (PdhCollectQueryData(s_query) != ERROR_SUCCESS)
+            return -1.0;
+        DWORD bytes = 0, count = 0;
+        if (PdhGetFormattedCounterArrayW(s_counter, PDH_FMT_DOUBLE, &bytes, &count, nullptr) != PDH_MORE_DATA)
+            return -1.0;
+        std::vector<unsigned char> buffer(bytes);
+        auto *items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W *>(buffer.data());
+        if (PdhGetFormattedCounterArrayW(s_counter, PDH_FMT_DOUBLE, &bytes, &count, items) != ERROR_SUCCESS)
+            return -1.0;
+        wchar_t prefix[32];
+        swprintf(prefix, 32, L"pid_%lu_", GetCurrentProcessId());
+        double total = 0.0;
+        for (DWORD i = 0; i < count; ++i)
+        {
+            const wchar_t *name = items[i].szName;
+            if (name && wcsstr(name, prefix) == name && wcsstr(name, L"engtype_3D") && items[i].FmtValue.CStatus == ERROR_SUCCESS)
+                total += items[i].FmtValue.doubleValue;
+        }
+        return std::min(total, 100.0);
+    }
+
     std::string computeSummary()
     {
         static uint64_t s_lastProcess = 0;
@@ -223,6 +267,14 @@ namespace
         else
             std::snprintf(text, sizeof(text), "CPU %.0f%% | RAM %.2f GB", s_cpuPercent, ramGb);
         std::string result = text;
+        // " | GPU n%" right after the CPU figure (the overlay and the title read it).
+        if (const double gpu = processGpuPercent(); gpu >= 0.0)
+        {
+            const size_t bar = result.find(" | RAM");
+            char g[32];
+            std::snprintf(g, sizeof(g), " | GPU %.0f%%", gpu);
+            result.insert(bar == std::string::npos ? result.size() : bar, g);
+        }
         if (!threads.empty())
             result += " | " + threads;
         return result;

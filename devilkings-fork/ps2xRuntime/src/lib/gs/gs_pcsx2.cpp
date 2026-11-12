@@ -15,6 +15,7 @@
 #include "runtime/gs/gs_pgs.h"
 #include "runtime/gs/rrv_pcsx2_gs_bridge.h"
 #include "runtime/ps2_memory.h"
+#include "runtime/ps2_settings.h"
 
 #include <algorithm>
 #include <atomic>
@@ -24,7 +25,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <deque>
+#include <filesystem>
+#include <unordered_map>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -40,6 +44,20 @@
 
 namespace ps2x::pcsx2gs
 {
+    // LOCAL PATCH (freeze report): GIF bytes handed to PCSX2 since start, read by the perf recorder.
+    static std::atomic<uint64_t> g_bytesSubmitted{0};
+
+    // LOCAL PATCH (F7 drawing capture): a copy of graphics memory, then every drawing record for a while, in the
+    // recordStream format, so PS2X_PCSX2_REPLAY can play it back offline. g_captureHold keeps new drawing out of the queue
+    // while the memory copy is taken. All three are only touched with the queue mutex held (recordStream runs there).
+    static std::atomic<bool> g_captureHold{false};
+    static FILE *g_captureFile = nullptr;
+    static uint64_t g_captureEndNs = 0u;
+    uint64_t bytesSubmitted()
+    {
+        return g_bytesSubmitted.load(std::memory_order_relaxed);
+    }
+
     namespace
     {
         struct Api
@@ -53,6 +71,7 @@ namespace ps2x::pcsx2gs
             int (*snapshotLocalMemory)(RrvPcsx2GsBridge *, uint8_t *, uint32_t, char *, uint32_t) = nullptr;
             int (*readLocalMemory)(RrvPcsx2GsBridge *, uint8_t *, uint32_t, uint64_t, uint64_t, uint64_t, char *, uint32_t) = nullptr;
             int (*resetGs)(RrvPcsx2GsBridge *, char *, uint32_t) = nullptr;
+            int (*updateOptions)(RrvPcsx2GsBridge *, char *, uint32_t) = nullptr; // LOCAL PATCH, optional
         };
 
         struct Job
@@ -61,7 +80,8 @@ namespace ps2x::pcsx2gs
             {
                 Submit,
                 Vsync,
-                Reset
+                Reset,
+                UpdateOptions // LOCAL PATCH: settings changed while playing (applyLiveSettings)
             } kind = Submit;
             uint32_t pathId = 0;
             uint32_t bytes = 0;
@@ -204,6 +224,22 @@ namespace ps2x::pcsx2gs
         }
         void recordStream(uint32_t type, const void *data, uint32_t bytes)
         {
+            if (g_captureFile)
+            {
+                if (nowNs() >= g_captureEndNs)
+                {
+                    std::fclose(g_captureFile);
+                    g_captureFile = nullptr;
+                    std::fprintf(stderr, "[capture] drawing capture finished\n");
+                }
+                else
+                {
+                    const uint32_t header[2] = {type, bytes};
+                    std::fwrite(header, sizeof(header), 1u, g_captureFile);
+                    if (bytes)
+                        std::fwrite(data, 1u, bytes, g_captureFile);
+                }
+            }
             static FILE *file = []() -> FILE *
             {
                 // "1" (settings [effects] record_drawing) = captures/gs_stream.bin; "0" or empty = off; else a path.
@@ -329,6 +365,7 @@ namespace ps2x::pcsx2gs
             api.vsync = reinterpret_cast<decltype(api.vsync)>(get("rrv_pcsx2_gs_bridge_vsync"));
             api.snapshot = reinterpret_cast<decltype(api.snapshot)>(get("rrv_pcsx2_gs_bridge_snapshot"));
             api.resetGs = reinterpret_cast<decltype(api.resetGs)>(get("rrv_pcsx2_gs_bridge_reset_gs")); // optional
+            api.updateOptions = reinterpret_cast<decltype(api.updateOptions)>(get("rrv_pcsx2_gs_bridge_update_options")); // optional
             api.readLocalMemory = reinterpret_cast<decltype(api.readLocalMemory)>(get("rrv_pcsx2_gs_bridge_read_local_memory"));
             api.snapshotLocalMemory =
                 reinterpret_cast<decltype(api.snapshotLocalMemory)>(get("rrv_pcsx2_gs_bridge_snapshot_local_memory"));
@@ -388,14 +425,11 @@ namespace ps2x::pcsx2gs
                 // Default 2 (the user's verdict on the progressive 2x mode: "really beautiful"); PS2X_PCSX2_SCALE=1 = field mode.
                 const char *scaleText = std::getenv("PS2X_PCSX2_SCALE");
                 const int scale = scaleText ? std::atoi(scaleText) : 2;
-                if (scale >= 2 && scale <= 8)
+                if (scale >= 2 && scale <= 12) // LOCAL PATCH: 12 = 8K (7680x5376)
                 {
                     s.fullFrameScale = scale;
                     if (!std::getenv("RRV_PCSX2_GS_FULL_SCALE"))
-                    {
-                        const char digit[2] = {static_cast<char>('0' + scale), '\0'};
-                        _putenv_s("RRV_PCSX2_GS_FULL_SCALE", digit);
-                    }
+                        _putenv_s("RRV_PCSX2_GS_FULL_SCALE", std::to_string(scale).c_str());
                 }
                 else if (!std::getenv("RRV_PCSX2_GS_INTERLACE"))
                 {
@@ -712,6 +746,26 @@ namespace ps2x::pcsx2gs
                 std::fprintf(stderr, "[pcsx2gs] GS reset (CSR.RESET)\n");
         }
 
+        // LOCAL PATCH: the renderer options from the RRV_PCSX2_GS_* variables, applied to the running renderer.
+        void runUpdateOptions(State &s)
+        {
+            if (!s.api.updateOptions)
+            {
+                std::fprintf(stderr, "[pcsx2gs] this bridge cannot change options while running\n");
+                return;
+            }
+            char error[256] = {};
+            const int updated = guardedCall(s.api.updateOptions, s.bridge, static_cast<char *>(error),
+                                            static_cast<uint32_t>(sizeof(error)));
+            if (updated == kCrashed)
+            {
+                abandon(s, "the PCSX2 bridge crashed changing its options");
+                return;
+            }
+            if (updated == 0)
+                std::fprintf(stderr, "[pcsx2gs] options update failed: %s\n", error);
+        }
+
         // Caller holds s.mutex.
         void runJob(State &s, Job &job)
         {
@@ -727,6 +781,9 @@ namespace ps2x::pcsx2gs
                 break;
             case Job::Reset:
                 runReset(s);
+                break;
+            case Job::UpdateOptions:
+                runUpdateOptions(s);
                 break;
             }
         }
@@ -866,6 +923,118 @@ namespace ps2x::pcsx2gs
         }
     }
 
+
+    // LOCAL PATCH (scarf colour mod): 1 KB image uploads (a 256-colour palette: 16x16 PSMCT32) are remembered by their
+    // contents with where they went (BITBLTBUF/TRXPOS/TRXREG), so a palette the game uploaded once can be uploaded
+    // again with other colours (ps2_scarf_colour.cpp, resendPalette). Parsed per path as the packets arrive; an IMAGE
+    // transfer may continue over several packets.
+    namespace
+    {
+        struct PaletteUpload
+        {
+            uint64_t bitbltbuf = 0, trxpos = 0, trxreg = 0;
+        };
+        struct PathParse
+        {
+            uint64_t bitbltbuf = 0, trxpos = 0, trxreg = 0;
+            uint32_t imageLeft = 0;  // bytes of IMAGE data still to come
+            bool collecting = false; // that data is a 1 KB palette being collected
+            std::vector<uint8_t> buffer;
+        };
+        std::mutex g_paletteMutex;
+        PathParse g_pathParse[4];
+        std::unordered_map<uint64_t, PaletteUpload> g_paletteUploads;
+
+        uint64_t paletteHash(const uint8_t *bytes)
+        {
+            uint64_t h = 1469598103934665603ull;
+            for (uint32_t i = 0; i < 1024u; ++i)
+                h = (h ^ bytes[i]) * 1099511628211ull;
+            return h;
+        }
+
+        void notePaletteUploads(uint32_t pathId, const uint8_t *data, uint32_t sizeBytes)
+        {
+            std::lock_guard<std::mutex> lock(g_paletteMutex);
+            PathParse &p = g_pathParse[pathId & 3u];
+            uint32_t pos = 0;
+            while (pos < sizeBytes)
+            {
+                if (p.imageLeft)
+                {
+                    const uint32_t take = std::min(p.imageLeft, sizeBytes - pos);
+                    if (p.collecting)
+                        p.buffer.insert(p.buffer.end(), data + pos, data + pos + take);
+                    p.imageLeft -= take;
+                    pos += take;
+                    if (!p.imageLeft && p.collecting)
+                    {
+                        p.collecting = false;
+                        if (g_paletteUploads.size() > 8192u)
+                            g_paletteUploads.clear();
+                        g_paletteUploads[paletteHash(p.buffer.data())] = PaletteUpload{p.bitbltbuf, p.trxpos, p.trxreg};
+                    }
+                    continue;
+                }
+                if (pos + 16u > sizeBytes)
+                    return;
+                uint64_t tag, regs;
+                std::memcpy(&tag, data + pos, 8u);
+                std::memcpy(&regs, data + pos + 8u, 8u);
+                pos += 16u;
+                const uint32_t nloop = static_cast<uint32_t>(tag & 0x7FFFu);
+                const uint32_t flg = static_cast<uint32_t>((tag >> 58) & 3u);
+                uint32_t nreg = static_cast<uint32_t>((tag >> 60) & 0xFu);
+                if (nreg == 0u)
+                    nreg = 16u;
+                if (flg == 0u)
+                {
+                    const uint64_t count = static_cast<uint64_t>(nloop) * nreg;
+                    bool hasAd = false;
+                    for (uint32_t r = 0; r < nreg; ++r)
+                        hasAd = hasAd || ((regs >> (4u * r)) & 0xFu) == 0xEu;
+                    if (!hasAd) // geometry (vertices, colours): skipped whole
+                    {
+                        if (pos + count * 16u > sizeBytes)
+                            return;
+                        pos += static_cast<uint32_t>(count * 16u);
+                        continue;
+                    }
+                    for (uint64_t i = 0; i < count; ++i)
+                    {
+                        if (pos + 16u > sizeBytes)
+                            return; // the tag goes on in the next packet: not followed
+                        if (((regs >> (4u * (i % nreg))) & 0xFu) == 0xEu)
+                        {
+                            uint64_t value, address;
+                            std::memcpy(&value, data + pos, 8u);
+                            std::memcpy(&address, data + pos + 8u, 8u);
+                            if ((address & 0xFFu) == 0x50u)
+                                p.bitbltbuf = value;
+                            else if ((address & 0xFFu) == 0x51u)
+                                p.trxpos = value;
+                            else if ((address & 0xFFu) == 0x52u)
+                                p.trxreg = value;
+                        }
+                        pos += 16u;
+                    }
+                }
+                else if (flg == 1u)
+                    pos += static_cast<uint32_t>(((static_cast<uint64_t>(nloop) * nreg + 1u) & ~1ull) * 8u);
+                else if (flg == 2u)
+                {
+                    p.imageLeft = nloop * 16u;
+                    // A 16x16 32-bit upload (TRXREG: width bits 0..11, height bits 32..43; DPSM 0 = PSMCT32).
+                    p.collecting = p.imageLeft == 1024u && ((p.bitbltbuf >> 56) & 0x3Fu) == 0u &&
+                                   (p.trxreg & 0xFFFu) == 16u && ((p.trxreg >> 32) & 0xFFFu) == 16u;
+                    p.buffer.clear();
+                }
+                else
+                    return;
+            }
+        }
+    }
+
     void gifTransfer(uint32_t path, const uint8_t *data, uint32_t sizeBytes)
     {
         if (!data || sizeBytes < 16u || !active())
@@ -891,8 +1060,16 @@ namespace ps2x::pcsx2gs
         }
         sizeBytes &= ~15u;
         std::unique_lock<std::mutex> q(s.qMutex);
+        while (g_captureHold.load(std::memory_order_acquire))
+        {
+            q.unlock();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            q.lock();
+        }
         s.bytesByPath[pathId] += sizeBytes;
+        g_bytesSubmitted.fetch_add(sizeBytes, std::memory_order_relaxed);
         recordStream(pathId, data, sizeBytes);
+        notePaletteUploads(pathId, data, sizeBytes);
         if (sizeBytes >= 4096u)
             ++s.bigPackets;
         // The packet is copied: the source is guest memory (or a caller's buffer) that changes once this returns.
@@ -1060,6 +1237,69 @@ namespace ps2x::pcsx2gs
         pushLocked(s, q, std::move(job));
     }
 
+    // LOCAL PATCH (settings without a restart): the renderer settings as they are now (render scale, anisotropic
+    // filtering, texture filter, edge anti-aliasing, blending accuracy) go to the bridge's variables, and the GS thread
+    // hands them to the running PCSX2 renderer. The render scale only changes within the progressive mode (2x..12x):
+    // to or from 1x is a different render mode, which still needs a restart (ps2_settings.cpp restartNeeded).
+    void applyLiveSettings()
+    {
+        if (g_started.load(std::memory_order_acquire) != 1)
+            return;
+        State &s = state();
+        const std::string scale = ps2x::settings::get("video", "render_scale");
+        if (s.fullFrameScale >= 2 && scale != "1")
+            _putenv_s("RRV_PCSX2_GS_FULL_SCALE", scale.c_str());
+        const std::string aniso = ps2x::settings::get("video", "anisotropic");
+        _putenv_s("RRV_PCSX2_GS_ANISO", aniso == "off" ? "0" : aniso.c_str());
+        _putenv_s("RRV_PCSX2_GS_TEXTURE_FILTER", ps2x::settings::get("video", "texture_filter") == "bilinear" ? "bilinear" : "ps2");
+        _putenv_s("RRV_PCSX2_GS_FULL_HWAA1", ps2x::settings::getBool("video", "edge_aa") ? "1" : "0");
+        const std::string blending = ps2x::settings::get("video", "blending");
+        _putenv_s("RRV_PCSX2_GS_BLENDING", blending == "minimum" ? "0" : blending == "medium" ? "2" : blending == "high" ? "3" : "1");
+        _putenv_s("RRV_PCSX2_GS_DITHERING", ps2x::settings::get("video", "dithering") == "off" ? "0" : "2");
+        Job job;
+        job.kind = Job::UpdateOptions;
+        std::unique_lock<std::mutex> q(s.qMutex);
+        pushLocked(s, q, std::move(job));
+        std::fprintf(stderr, "[pcsx2gs] renderer settings changed while playing (scale %s, anisotropic %s, blending %s)\n",
+                     scale.c_str(), aniso.c_str(), blending.c_str());
+    }
+
+    // LOCAL PATCH (scarf colour mod): uploads `palette` (1 KB) where the game last uploaded a palette equal to `match1`
+    // or `match2`. False if no such upload was seen (yet).
+    bool resendPalette(const uint8_t *match1, const uint8_t *match2, const uint8_t *palette)
+    {
+        if (!active())
+            return false;
+        PaletteUpload where;
+        {
+            std::lock_guard<std::mutex> lock(g_paletteMutex);
+            auto it = g_paletteUploads.find(paletteHash(match1));
+            if (it == g_paletteUploads.end() && match2)
+                it = g_paletteUploads.find(paletteHash(match2));
+            if (it == g_paletteUploads.end())
+                return false;
+            where = it->second;
+        }
+        alignas(16) uint8_t packet[16u * 6u + 1024u];
+        uint64_t q[12] = {};
+        q[0] = 4u | (1ull << 60); // NLOOP 4, PACKED, NREG 1
+        q[1] = 0xEu;              // A+D
+        q[2] = where.bitbltbuf;
+        q[3] = 0x50u;
+        q[4] = where.trxpos;
+        q[5] = 0x51u;
+        q[6] = where.trxreg;
+        q[7] = 0x52u;
+        q[8] = 0u; // TRXDIR: host -> local
+        q[9] = 0x53u;
+        q[10] = 64u | (1ull << 15) | (2ull << 58); // IMAGE, 64 qwords, EOP
+        q[11] = 0u;
+        std::memcpy(packet, q, sizeof(q));
+        std::memcpy(packet + sizeof(q), palette, 1024u);
+        gifTransfer(2u, packet, static_cast<uint32_t>(sizeof(packet)));
+        return true;
+    }
+
     bool readLocalToHost(uint8_t *dst, uint32_t byteCount, uint64_t bitbltbuf, uint64_t trxpos, uint64_t trxreg)
     {
         if (!dst || byteCount == 0u || !active())
@@ -1082,6 +1322,77 @@ namespace ps2x::pcsx2gs
         const bool ok = result != 0;
         if (!ok && logging())
             std::fprintf(stderr, "[pcsx2gs] GS->EE read of %u bytes failed: %s\n", byteCount, error);
+        return ok;
+    }
+
+    // F7: copies graphics memory through PCSX2 (so it is what the GPU really has) as 16 upload packets of 64x1024 32-bit
+    // pixels, then records the drawing for `seconds`. Replay with PS2X_PCSX2_REPLAY=<file>.
+    bool startCapture(double seconds)
+    {
+        if (!active())
+            return false;
+        State &s = state();
+        if (!ensureStarted(s))
+            return false;
+        {
+            std::lock_guard<std::mutex> q(s.qMutex);
+            if (g_captureFile)
+                return false; // one at a time
+            g_captureHold.store(true, std::memory_order_release);
+        }
+        std::error_code ec;
+        std::filesystem::create_directories("captures", ec);
+        const std::time_t t = std::time(nullptr);
+        char stamp[32];
+        std::strftime(stamp, sizeof(stamp), "%Y%m%d_%H%M%S", std::localtime(&t));
+        const std::string path = std::string("captures/gs_capture_") + stamp + ".bin";
+        FILE *file = std::fopen(path.c_str(), "wb");
+        bool ok = file != nullptr;
+        constexpr uint32_t kRows = 1024u, kWidth = 64u, kChunks = 16u; // 16 x 256 KB = all 4 MB
+        constexpr uint32_t kBytes = kRows * kWidth * 4u;
+        std::vector<uint8_t> pixels(kBytes);
+        std::vector<uint8_t> packet(16u * 6u + kBytes);
+        for (uint32_t chunk = 0; ok && chunk < kChunks; ++chunk)
+        {
+            const uint64_t bp = static_cast<uint64_t>(chunk) * (kRows / 32u) * 32u; // 32 pages of 32 blocks per chunk
+            const uint64_t trxreg = static_cast<uint64_t>(kWidth) | (static_cast<uint64_t>(kRows) << 32);
+            const uint64_t readBuf = bp | (1ull << 16); // SBP, SBW = 1 (64 pixels), SPSM = PSMCT32
+            ok = readLocalToHost(pixels.data(), kBytes, readBuf, 0u, trxreg);
+            if (!ok)
+                break;
+            // GIF packet: A+D tag (4 registers), BITBLTBUF/TRXPOS/TRXREG/TRXDIR=0, then an IMAGE tag and the pixels.
+            uint64_t q[12] = {};
+            q[0] = 4u | (1ull << 60); // NLOOP 4, PACKED, NREG 1
+            q[1] = 0xEu;                                  // A+D
+            q[2] = bp << 32 | (1ull << 48);               // DBP, DBW = 1, DPSM = PSMCT32
+            q[3] = 0x50u;
+            q[4] = 0u;
+            q[5] = 0x51u;
+            q[6] = trxreg;
+            q[7] = 0x52u;
+            q[8] = 0u;
+            q[9] = 0x53u;
+            q[10] = static_cast<uint64_t>(kBytes / 16u) | (1ull << 15) | (2ull << 58); // IMAGE, EOP
+            q[11] = 0u;
+            std::memcpy(packet.data(), q, sizeof(q));
+            std::memcpy(packet.data() + sizeof(q), pixels.data(), kBytes);
+            const uint32_t header[2] = {2u, static_cast<uint32_t>(sizeof(q) + kBytes)};
+            ok = std::fwrite(header, sizeof(header), 1u, file) == 1u &&
+                 std::fwrite(packet.data(), 1u, sizeof(q) + kBytes, file) == sizeof(q) + kBytes;
+        }
+        {
+            std::lock_guard<std::mutex> q(s.qMutex);
+            if (ok)
+            {
+                g_captureFile = file;
+                g_captureEndNs = nowNs() + static_cast<uint64_t>(seconds * 1.0e9);
+            }
+            else if (file)
+                std::fclose(file);
+            g_captureHold.store(false, std::memory_order_release);
+        }
+        std::fprintf(stderr, "[capture] %s %s (graphics memory, then %.0f seconds of drawing)\n",
+                     ok ? "recording" : "could not record", path.c_str(), seconds);
         return ok;
     }
 
@@ -1110,6 +1421,74 @@ namespace ps2x::pcsx2gs
             return false;
         std::memcpy(dst, all.data(), std::min<size_t>(sizeBytes, all.size()));
         return true;
+    }
+
+
+    // LOCAL PATCH (scarf colour mod): finds a 256-colour palette (16x16 PSMCT32, uploaded at the start of a block, as a
+    // game uploads a CLUT) in graphics memory by its colours, and writes `palette` over it. Used when the game's own
+    // upload of the scarf palette was not seen (it is uploaded once, when a stage loads). `candidates` are palettes it
+    // may hold now (the game's original, the colours last written); the first one found is replaced. One copy of the
+    // 4 MB memory, only when the player changes the colour.
+    bool rewritePaletteInVram(const std::vector<const uint8_t *> &candidates, const uint8_t *palette)
+    {
+        if (!active() || candidates.empty())
+            return false;
+        std::vector<uint8_t> vram(RRV_PCSX2_GS_BRIDGE_LOCAL_MEMORY_BYTES);
+        if (!readVram(vram.data(), static_cast<uint32_t>(vram.size())))
+            return false;
+        // PSMCT32 layout (the GS's own swizzle): a block is 8x8 pixels (64 words), blocks within a page and words within
+        // a block are in these orders.
+        static const uint8_t kBlock32[4][8] = {{0, 1, 4, 5, 16, 17, 20, 21},
+                                               {2, 3, 6, 7, 18, 19, 22, 23},
+                                               {8, 9, 12, 13, 24, 25, 28, 29},
+                                               {10, 11, 14, 15, 26, 27, 30, 31}};
+        static const uint8_t kColumn32[8][8] = {{0, 1, 4, 5, 8, 9, 12, 13},         {2, 3, 6, 7, 10, 11, 14, 15},
+                                                {16, 17, 20, 21, 24, 25, 28, 29},   {18, 19, 22, 23, 26, 27, 30, 31},
+                                                {32, 33, 36, 37, 40, 41, 44, 45},   {34, 35, 38, 39, 42, 43, 46, 47},
+                                                {48, 49, 52, 53, 56, 57, 60, 61},   {50, 51, 54, 55, 58, 59, 62, 63}};
+        uint32_t offset[256]; // word offset of each of the 16x16 pixels from the base block
+        for (uint32_t y = 0; y < 16; ++y)
+            for (uint32_t x = 0; x < 16; ++x)
+                offset[y * 16 + x] = kBlock32[y / 8][x / 8] * 64u + kColumn32[y % 8][x % 8];
+        const uint32_t *words = reinterpret_cast<const uint32_t *>(vram.data());
+        const uint32_t blocks = static_cast<uint32_t>(vram.size() / 256u);
+        for (const uint8_t *want : candidates)
+        {
+            if (!want)
+                continue;
+            const uint32_t *pal = reinterpret_cast<const uint32_t *>(want);
+            // The GS adds the block order above to the upload's base block (any block), so every base is tried.
+            for (uint32_t bp = 0; bp + 4u <= blocks; ++bp)
+            {
+                const uint32_t base = bp * 64u;
+                bool same = true;
+                for (uint32_t i = 0; i < 256u && same; ++i)
+                    same = words[base + offset[i]] == pal[i];
+                if (!same)
+                    continue;
+                alignas(16) uint8_t packet[16u * 6u + 1024u];
+                uint64_t q[12] = {};
+                q[0] = 4u | (1ull << 60); // NLOOP 4, PACKED, NREG 1
+                q[1] = 0xEu;              // A+D
+                q[2] = (static_cast<uint64_t>(bp) << 32) | (1ull << 48); // DBP, DBW 1 (64 pixels), DPSM PSMCT32
+                q[3] = 0x50u;
+                q[4] = 0u; // TRXPOS 0,0
+                q[5] = 0x51u;
+                q[6] = 16u | (16ull << 32); // TRXREG 16x16
+                q[7] = 0x52u;
+                q[8] = 0u; // TRXDIR host -> local
+                q[9] = 0x53u;
+                q[10] = 64u | (1ull << 15) | (2ull << 58); // IMAGE, 64 qwords, EOP
+                q[11] = 0u;
+                std::memcpy(packet, q, sizeof(q));
+                std::memcpy(packet + sizeof(q), palette, 1024u);
+                gifTransfer(2u, packet, static_cast<uint32_t>(sizeof(packet)));
+                std::fprintf(stderr, "[scarf] palette found in graphics memory at block 0x%x and replaced\n", bp);
+                return true;
+            }
+        }
+        std::fprintf(stderr, "[scarf] palette not found in graphics memory\n");
+        return false;
     }
 
     // PS2X_PCSX2_REPLAY=<recording>: feeds a recorded stream (see recordStream) to the bridge with no game running and

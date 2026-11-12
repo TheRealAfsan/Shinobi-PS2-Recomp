@@ -40,6 +40,11 @@ STORE_NO_READY = os.environ.get('VU1REC_STORE_NR', '0') != '0'  # A/B 2026-11-07
 DEFER_READY_STORES = os.environ.get("VU1REC_DEFER", "0") != "0"  # OFF: keeps every t<j> live to the exits; MSVC then gave one run part a 236 KB stack frame (stack overflow)
 
 
+# LOCAL PATCH: record entry inputs while running for programs run_entries cannot bound (Emitter.track_line).
+# VU1REC_DYNAMIC=0 emits the programs exactly as before.
+DYNAMIC_INPUTS = os.environ.get('VU1REC_DYNAMIC', '1') != '0'
+
+
 class Reject(Exception):
     pass
 
@@ -773,6 +778,97 @@ class Emitter:
         if self.lite:
             self.writeback += ' x.foldLite(liteSign, liteMinAbs);'
         self.heads = self.block_heads()
+        # LOCAL PATCH (dynamic inputs): programs whose entry inputs run_entries cannot bound (computed jumps, P) record
+        # what they read while running on a VU1 worker (Exec::trackRegs), so their runs can still go to the workers.
+        # Programs with FSSET stay out (the merge cannot rebuild their sticky bits).
+        has_jr = any(not q.i_bit and q.op_hi in (0x24, 0x25) for q in pairs.values())
+        has_p = any(not q.i_bit and (q.lower >> 25) & 0x7F == 0x40 and
+                    (lower_special(q.lower) in EFU_LATENCY or lower_special(q.lower) in (0x64, 0x7B)) for q in pairs.values())
+        self.dynamic = DYNAMIC_INPUTS and not self.has_fsset and (has_jr or has_p)
+
+    def track_line(self, seq):
+        """Exec::trackBlock for pairs `seq` run in this order (a block, or one pair): what they read before writing it,
+        the VI a branch at the head reads (the old value of the pair before), what they write and the VI written by all
+        but the last. Empty for programs that do not record their inputs."""
+        if not self.dynamic:
+            return ''
+        wvf = set()
+        wvi = 0
+        wacc = 0
+        rvf = set()
+        rvi = 0
+        rvi_head = 0
+        racc = 0
+        wvi_before_prev = 0
+        prev_vb = None
+        for k, p in enumerate(seq):
+            for reg, lanes in p.up.vf_read + p.lo.vf_read:
+                if reg:
+                    for c in comps(lanes):
+                        if (reg, c) not in wvf:
+                            rvf.add((reg, c))
+            vi_reads = (p.up.vi_read | p.lo.vi_read) & 0xFFFE
+            for reg in range(1, 16):
+                if not vi_reads & (1 << reg):
+                    continue
+                if p.is_branch and k == 0:
+                    rvi_head |= 1 << reg  # the pair before is outside: Exec::wrViBeforeLast (a superset of the inputs)
+                elif p.is_branch and prev_vb == reg:
+                    if not wvi_before_prev & (1 << reg):
+                        rvi |= 1 << reg   # the old value, from before the pair ahead
+                elif not wvi & (1 << reg):
+                    rvi |= 1 << reg
+            for c in comps(p.up.acc_read | p.lo.acc_read):
+                if not wacc & (1 << c):
+                    racc |= 1 << c
+            if upper_reads_i(p.upper) and not wacc & 16:
+                racc |= 16
+            wvi_before_prev = wvi
+            reg, lanes = p.up.vf_write
+            if reg:
+                wvf.update((reg, c) for c in comps(lanes))
+            reg, lanes = p.lo.vf_write
+            if reg and p.suppressed != reg:
+                wvf.update((reg, c) for c in comps(lanes))
+            vi_writes = p.lo.vi_write & 0xFFFE
+            wvi |= vi_writes
+            for c in comps(p.up.acc_write):
+                wacc |= 1 << c
+            if p.i_bit:
+                wacc |= 16
+            first_vi = next((r for r in range(1, 16) if vi_writes & (1 << r)), 0)
+            prev_vb = first_vi if first_vi and p.lo.delays_branch else None
+
+        def bits(keys, low):
+            value = 0
+            for reg, c in keys:
+                index = reg * 4 + c - (0 if low else 64)
+                if 0 <= index < 64:
+                    value |= 1 << index
+            return value
+        return (f'if (x.trackRegs) x.trackBlock(0x{bits(rvf, True):x}ull, 0x{bits(rvf, False):x}ull, 0x{rvi:x}u, 0x{rvi_head:x}u, '
+                f'0x{racc:x}u, 0x{bits(wvf, True):x}ull, 0x{bits(wvf, False):x}ull, 0x{wvi:x}u, 0x{wvi_before_prev:x}u, '
+                f'0x{wacc:x}u);')
+
+    def dyn_notes(self, p):
+        """Reads of state whose writes land later (flags, Q, P), noted after the pair's commits: an earlier run's value
+        when this run's own has not landed yet."""
+        if not self.dynamic:
+            return []
+        notes = []
+        if upper_reads_q(p.upper):
+            notes.append('if (x.trackRegs && !x.qLanded) x.rdOther |= kInputQ;')
+        if not p.i_bit:
+            clip_bits = clip_bits_read(p)
+            if clip_bits:
+                notes.append(f'if (x.trackRegs) x.noteClipRead(0x{clip_bits:06x}u);')
+            if p.op_hi in (0x14, 0x16, 0x17):
+                notes.append('if (x.trackRegs) x.rdOther |= kInputStatus;')
+            if p.op_hi in MAC_READS:
+                notes.append('if (x.trackRegs && !x.macLanded) x.rdOther |= kInputMac;')
+            if (p.lower >> 25) & 0x7F == 0x40 and lower_special(p.lower) == 0x64:
+                notes.append('if (x.trackRegs && !x.pLanded) x.rdOther |= kInputP;')
+        return notes
 
     def block_heads(self):
         """Pairs where control can arrive other than by falling through from the pair before:
@@ -901,6 +997,7 @@ class Emitter:
 
         body = [f't = {tk};']
         body.extend(self.commit_lines(p))
+        body.extend(self.dyn_notes(p))
         body.extend(up_compute)
         body.extend(lo_compute)
         if p.i_bit:
@@ -965,6 +1062,13 @@ class Emitter:
             out.extend(indent + line for line in lines)
 
         pcs = self.block_pcs(head)
+        last = self.pairs[pcs[-1]]
+        seq = [self.pairs[pc] for pc in pcs]
+        if last.is_branch or last.e_bit:
+            seq.append(self.all_pairs[(last.pc + 8) & 0x3FFF])
+        track = self.track_line(seq)
+        if track:
+            out.append('        ' + track)
         for pc in pcs:
             p = self.pairs[pc]
             out.append(f'        // 0x{pc:04x} up={p.upper:08x} lo={p.lower:08x}')
@@ -1545,6 +1649,7 @@ class Emitter:
             out.append(f'if (t >= budget) {{ {self.writeback} x.handoff(0x{p.pc:04x}u); return; }}')
 
         out.extend(self.commit_lines(p))
+        out.extend(self.dyn_notes(p))
 
         out.extend(up_compute)
         out.extend(lo_compute)
@@ -1581,6 +1686,9 @@ class Emitter:
         else:
             out.append('vbValid = false;')
         out.append('cyc = t + 1u;')
+        track = self.track_line([p])
+        if track:
+            out.insert(0, track)
         return out, branch
 
     def commit_lines(self, p):
@@ -1800,6 +1908,10 @@ class Emitter:
         L('}')
         L('')
         entries = run_entries(self.pairs, self.all_pairs) or {}
+        if not entries and self.dynamic:
+            # Every MSCAL/MSCNT entry point; the run records its inputs (kInputDynamic).
+            roots = {0} | {(pc + 16) & 0x3FFF for pc, q in self.pairs.items() if q.e_bit}
+            entries = {pc: {('dynamic',)} for pc in sorted(roots) if pc in self.pairs}
         self.entries = entries
         if entries:
             L('// State each entry reads from earlier runs (vu1rec.py entry_inputs).')
@@ -1817,7 +1929,7 @@ class Emitter:
                     elif key[0] == 'clip':
                         clip |= key[1]
                     else:
-                        other |= {'q': 1, 'i': 2, 'mac': 4, 'status': 8}[key[0]]
+                        other |= {'q': 1, 'i': 2, 'mac': 4, 'status': 8, 'dynamic': 0x80}[key[0]]
                 lanes = ', '.join(str(v) for v in vf)
                 L(f'    {{0x{pc:04x}u, 0x{vi:04x}u, {acc}u, {other}u, 0x{clip:06x}u, {{{lanes}}}}}, // {describe_inputs(inputs)}')
             L('};')

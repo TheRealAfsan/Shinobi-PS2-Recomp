@@ -324,10 +324,16 @@ namespace ps2x::settings
                 Definition renderScale{"video", "render_scale", "Render resolution (PCSX2)",
                                        "How many times the PS2's resolution the PCSX2 renderer draws at: 2x is 1280x896, "
                                        "4x is 2560x1792. Higher is sharper and costs only GPU time.",
-                                       Kind::Choice, "3", "PS2X_PCSX2_SCALE", {"1", "2", "3", "4", "6", "8"},
-                                       {"1x (native, interlaced)", "2x", "3x", "4x", "6x", "8x"}, 0, 0, nullptr, false};
-                renderScale.choiceEnvironment = {"1", "", "3", "4", "6", "8"};
+                                       Kind::Choice, "3", "PS2X_PCSX2_SCALE", {"1", "2", "3", "4", "6", "8", "12"},
+                                       {"1x (native, interlaced)", "2x", "3x", "4x", "6x", "8x", "12x (8K)"}, 0, 0, nullptr,
+                                       true}; // LOCAL PATCH: live (gs_pcsx2.cpp applyLiveSettings), except to or from 1x
+                // LOCAL PATCH: 12x = 8K (7680x5376), PCSX2's highest upscale; the launcher offers it once the Mod Menu's
+                // "8K resolution" switch is on.
+                renderScale.choiceEnvironment = {"1", "", "3", "4", "6", "8", "12"};
                 add(renderScale);
+                add({"video", "allow_8k", "8K resolution",
+                     "Offers 12x (8K) in the launcher's Resolution list. Needs a very powerful graphics card.", Kind::Bool,
+                     "false", nullptr, {}, {}, 0, 0, nullptr, false});
                 Definition gpuApi{"video", "pcsx2_renderer", "Graphics API (PCSX2)",
                                   "Which GPU interface the PCSX2 renderer uses. Both give the same picture.",
                                   Kind::Choice, "d3d11", "PS2X_PCSX2_RENDERER", {"d3d11", "vulkan"},
@@ -336,19 +342,46 @@ namespace ps2x::settings
                 add(gpuApi);
                 add({"video", "edge_aa", "Edge anti-aliasing (PCSX2)",
                      "The PS2's own edge smoothing (GS AA1) on the polygons that ask for it.", Kind::Bool, "false",
-                     "RRV_PCSX2_GS_FULL_HWAA1", {}, {}, 0, 0, nullptr, false});
+                     "RRV_PCSX2_GS_FULL_HWAA1", {}, {}, 0, 0, nullptr, true}); // LOCAL PATCH: live
                 Definition aniso{"video", "anisotropic", "Anisotropic filtering (PCSX2)",
                                  "Sharper textures on surfaces seen at an angle (floors, walls).", Kind::Choice, "2",
                                  "RRV_PCSX2_GS_ANISO", {"off", "2", "4", "8", "16"}, {"Off", "2x", "4x", "8x", "16x"}, 0, 0,
-                                 nullptr, false};
+                                 nullptr, true}; // LOCAL PATCH: live
                 aniso.choiceEnvironment = {"", "2", "4", "8", "16"};
                 add(aniso);
                 Definition texFilter{"video", "texture_filter", "Texture filtering (PCSX2)",
                                      "PS2 uses each texture as the game asked; bilinear smooths every texture.",
                                      Kind::Choice, "ps2", "RRV_PCSX2_GS_TEXTURE_FILTER", {"ps2", "bilinear"},
-                                     {"As on PS2", "Bilinear (smooth)"}, 0, 0, nullptr, false};
+                                     {"As on PS2", "Bilinear (smooth)"}, 0, 0, nullptr, true}; // LOCAL PATCH: live
                 texFilter.choiceEnvironment = {"", "bilinear"};
                 add(texFilter);
+                // LOCAL PATCH (low-end GPUs): PCSX2's blending accuracy. Basic is PCSX2's own default; Minimum skips the
+                // extra blending passes on slower graphics cards (the launcher's Low-end PC preset).
+                Definition blending{"video", "blending", "Blending accuracy (PCSX2)",
+                                    "How exactly see-through effects are blended. Minimum is lighter on slow graphics cards.",
+                                    Kind::Choice, "basic", "RRV_PCSX2_GS_BLENDING", {"minimum", "basic", "medium", "high"},
+                                    {"Minimum", "Basic", "Medium", "High"}, 0, 0, nullptr, true}; // LOCAL PATCH: live
+                blending.choiceEnvironment = {"0", "1", "2", "3"};
+                add(blending);
+                // LOCAL PATCH: the launcher's Effects tab (PCSX2 options through the bridge).
+                Definition dithering{"video", "dithering", "Dithering (PCSX2)",
+                                     "The PS2's grainy colour pattern. Off gives smooth, clean colour gradients.",
+                                     Kind::Choice, "on", "RRV_PCSX2_GS_DITHERING", {"on", "off"}, {"On", "Off"}, 0, 0,
+                                     nullptr, true}; // live (applyLiveSettings)
+                dithering.choiceEnvironment = {"2", "0"};
+                add(dithering);
+                Definition mipmap{"video", "mipmapping", "Mipmapping (PCSX2)",
+                                  "Smaller versions of textures far away: less shimmer on distant floors and walls.",
+                                  Kind::Choice, "on", "RRV_PCSX2_GS_FULL_HWMIPMAP", {"on", "off"}, {"On", "Off"}, 0, 0,
+                                  nullptr, false};
+                mipmap.choiceEnvironment = {"1", "0"};
+                add(mipmap);
+                Definition upfix{"video", "upscale_fixes", "Upscaling fixes (PCSX2)",
+                                 "Half-pixel offset and sprite rounding: removes seams and thin lines at high resolutions.",
+                                 Kind::Choice, "on", "RRV_PCSX2_GS_FULL_HPO", {"on", "off"}, {"On", "Off"}, 0, 0, nullptr,
+                                 false};
+                upfix.choiceEnvironment = {"", "0"};
+                add(upfix);
                 // LOCAL PATCH: done by the window's own shader (casSharpen, ps2_runtime.cpp): PCSX2's CAS runs at its
                 // presentation step, which the bridge's picture never goes through, so RRV_PCSX2_GS_CAS did nothing.
                 add({"video", "sharpening", "Sharpening",
@@ -374,6 +407,15 @@ namespace ps2x::settings
                 add({"input", "stick_deadzone", "Stick dead zone",
                      "How far a controller stick has to move before the game sees it, in percent. Raise it if the character or "
                      "camera drifts on its own.", Kind::Number, "15", nullptr, {}, {}, 0, 50, nullptr, true});
+                // LOCAL PATCH: DualSense haptics and adaptive triggers (ps2_dualsense.cpp).
+                add({"input", "haptics", "DualSense haptics",
+                     "Footsteps, shuriken throws, ninja magic and hits felt through a PS5 DualSense or DualSense Edge.",
+                     Kind::Bool, "true", nullptr, {}, {}, 0, 0, nullptr, true});
+                add({"input", "haptic_strength", "Haptic strength", "How strong the DualSense haptics are, in percent.",
+                     Kind::Number, "100", nullptr, {}, {}, 0, 100, nullptr, true});
+                add({"input", "trigger_resistance", "L2 trigger resistance",
+                     "L2 stiffens part way down and gives way with a click just before the ninja magic fires.",
+                     Kind::Bool, "true", nullptr, {}, {}, 0, 0, nullptr, true});
             }
             {
                 // LOCAL PATCH (effects): the PCSX2 renderer settings that decide whether Shinobi's screen effects (fog, glow,
@@ -438,7 +480,7 @@ namespace ps2x::settings
                                   "see more to the sides; auto uses your monitor's exact shape. Menus and movies stay 4:3.",
                                   Kind::Choice, "16:9", "PS2X_WIDESCREEN", {"4:3", "16:9", "21:9", "32:9", "auto", "stretch"},
                                   {"4:3", "16:9", "21:9 ultrawide", "32:9 super ultrawide", "Auto (monitor)", "Stretch"}, 0,
-                                  0, nullptr, false};
+                                  0, nullptr, true}; // LOCAL PATCH: live (ps2xWidescreenVsync)
                 aspect.choiceEnvironment = {"", "16:9", "21:9", "32:9", "auto", ""};
                 add(aspect);
             }
@@ -487,6 +529,14 @@ namespace ps2x::settings
                 fastVu.choiceEnvironment = {"", "1"};
                 add(fastVu);
             }
+            // LOCAL PATCH (mod): the close-up, over-the-shoulder camera (ps2_close_camera.cpp). F3 in game.
+            add({"game", "close_camera", "Close-up camera",
+                 "A closer, over-the-shoulder camera for more intimate combat. F3 switches it while playing.", Kind::Bool,
+                 "false", nullptr, {}, {}, 0, 0, nullptr, true});
+            // LOCAL PATCH: the performance overlay (FPS, frame time, 1% low, CPU, GPU, RAM, VRAM) in the top-left corner.
+            add({"performance", "stats_overlay", "Performance overlay",
+                 "FPS, frame time, 1% lows, CPU and GPU use, RAM and VRAM in the top-left corner while you play.",
+                 Kind::Bool, "false", nullptr, {}, {}, 0, 0, nullptr, true});
             add({"performance", "show_fps", "Mostrar FPS", "Contador de quadros por segundo no canto da tela.",
                  Kind::Bool, "false", nullptr, {}, {}, 0, 0, nullptr, true});
             // Áudio
@@ -527,6 +577,11 @@ namespace ps2x::settings
             add({"game", "studio_intro", "Studio intro (Twilight Orchard)",
                  "Plays intro/studio_intro.mp4 before the game starts. Any key or button skips it.", Kind::Bool, "true",
                  "PS2X_STUDIO_INTRO", {}, {}, 0, 0, nullptr, false});
+            // LOCAL PATCH (mod): Hotsuma's scarf colour, "original" (red) or #RRGGBB (ps2_scarf_colour.cpp). Live: the
+            // in-game menu can change it while playing.
+            add({"game", "scarf_color", "Scarf colour",
+                 "Hotsuma's scarf: original (red) or any colour as #RRGGBB.", Kind::Path, "original", nullptr, {}, {}, 0, 0,
+                 nullptr, true});
             // Saves: cópias de segurança
             add({"saves", "backups", "Cópias de segurança",
                  "Ao abrir o jogo, copia os memory cards para saves_backup/ e guarda as mais recentes.",
@@ -744,6 +799,11 @@ namespace ps2x::settings
         {
             const std::string key = keyOf(definition.section, definition.key);
             if (!definition.live && s.values[key] != s.atLoad[key])
+                return true;
+            // LOCAL PATCH: the render scale changes live within the progressive mode (2x..12x); 1x is another render
+            // mode (interlaced fields), so going to or from it still needs a restart.
+            if (key == keyOf("video", "render_scale") && s.values[key] != s.atLoad[key] &&
+                (s.values[key] == "1" || s.atLoad[key] == "1"))
                 return true;
         }
         return false;

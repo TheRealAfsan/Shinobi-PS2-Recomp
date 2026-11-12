@@ -174,6 +174,26 @@ namespace ps2x::iop
         m_impl->emulator.runEeCycles(eeCycles);
     }
 
+    void IopSubsystem::setDeferral(uint64_t minBatchCycles, uint64_t budgetNanoseconds, uint64_t maxDeferredCycles) noexcept
+    {
+        m_impl->emulator.setDeferral(minBatchCycles, budgetNanoseconds, maxDeferredCycles);
+    }
+
+    void IopSubsystem::idleFlush() noexcept
+    {
+        m_impl->emulator.idleFlush();
+    }
+
+    namespace detail
+    {
+        uint64_t iopRunNanoseconds() noexcept;
+    }
+
+    uint64_t IopSubsystem::runNanoseconds() noexcept
+    {
+        return detail::iopRunNanoseconds();
+    }
+
     RpcAbi IopSubsystem::selectRpcAbi(const RpcAbiRequest &request) const
     {
         for (const auto &service : m_impl->coreServices)

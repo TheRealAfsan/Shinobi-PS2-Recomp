@@ -272,6 +272,7 @@ namespace ps2x::vu1c
         bool writesStatus = false;
         bool writesSticky = false;
         bool writesClip = false;
+        uint8_t clipShifts = 0; // LOCAL PATCH (dynamic inputs): 1 for a CLIP, 4 for an FCSET
     };
 
     // FMAC operations translated with Exec::fmacVec.
@@ -398,6 +399,62 @@ namespace ps2x::vu1c
         // the 1.3 KB clear per run (VU1Interpreter::exportCompiledState sets trackMem = false).
         bool trackMem = true;
 
+        // LOCAL PATCH (dynamic inputs): the state left by earlier runs that this run really read. Programs whose entry
+        // points vu1rec.py cannot bound statically (computed jumps, EFU) record it while they run instead, so that a run
+        // started early on a VU1 worker can be checked against what the runs ahead of it left: the result is kept when
+        // every register it read before writing it holds the same value; otherwise the run is done again. Only the
+        // worker runs set trackRegs; on the VIF1 thread each block costs one predicted branch.
+        //   rdVf/wrVf: bit reg * 4 + component (x = 0) of VF; rdVi/wrVi: bit reg of VI; rdAcc/wrAcc: bits 0-3 the ACC
+        //   lanes, bit 4 the I register; rdOther: kInput* bits; rdClip: bits of the clip flags as they were when the
+        //   run started. wrViBeforeLast: VI written before the last pair run (a branch reads its pair-ahead's old VI).
+        bool trackRegs = false;
+        uint64_t rdVf[2] = {0u, 0u};
+        uint64_t wrVf[2] = {0u, 0u};
+        uint32_t rdVi = 0u;
+        uint32_t wrVi = 0u;
+        uint32_t wrViBeforeLast = 0u;
+        uint32_t rdAcc = 0u;
+        uint32_t wrAcc = 0u;
+        uint32_t rdOther = 0u;
+        uint32_t rdClip = 0u;
+        // Results of this run that have landed (a read before then sees the earlier runs' value).
+        uint8_t clipLanded = 0u; // clip writes landed, 4 = none of the earlier flags left
+        bool macLanded = false;
+        bool qLanded = false;
+        bool pLanded = false;
+
+        void clearRegSets()
+        {
+            rdVf[0] = rdVf[1] = wrVf[0] = wrVf[1] = 0u;
+            rdVi = wrVi = wrViBeforeLast = 0u;
+            rdAcc = wrAcc = rdOther = rdClip = 0u;
+            clipLanded = 0u;
+            macLanded = qLanded = pLanded = false;
+        }
+
+        // A straight run of pairs (vu1rec.py track_summary): reads before writes in the block, VI read by a branch
+        // at its head (old value of the pair before), writes, and VI written by all but its last pair.
+        PS2X_VU1C_INLINE void trackBlock(uint64_t r0, uint64_t r1, uint32_t rVi, uint32_t rViHead, uint32_t rAcc,
+                                         uint64_t w0, uint64_t w1, uint32_t wVi, uint32_t wViButLast, uint32_t wAcc)
+        {
+            rdVf[0] |= r0 & ~wrVf[0];
+            rdVf[1] |= r1 & ~wrVf[1];
+            rdVi |= (rVi & ~wrVi) | (rViHead & ~wrViBeforeLast);
+            rdAcc |= rAcc & ~wrAcc;
+            wrVf[0] |= w0;
+            wrVf[1] |= w1;
+            wrAcc |= wAcc;
+            wrViBeforeLast = wrVi | wViButLast;
+            wrVi |= wVi;
+        }
+
+        // A clip flag read of `bits` (after commitTo): the bits not yet shifted in by this run's CLIPs are the earlier ones.
+        PS2X_VU1C_INLINE void noteClipRead(uint32_t bits)
+        {
+            if (clipLanded < 4u)
+                rdClip |= (bits >> (6u * clipLanded)) & 0xFFFFFFu;
+        }
+
         // ------------------------------------------------------------ read and write sets
 
         PS2X_VU1C_INLINE void noteMemRead(uint32_t address)
@@ -502,7 +559,11 @@ namespace ps2x::vu1c
                 if (entry.writesSticky)
                     status = (status & 0x03Fu) | (entry.status & 0xFC0u);
                 if (entry.writesClip)
+                {
                     clip = entry.clip;
+                    clipLanded = static_cast<uint8_t>(std::min<uint32_t>(4u, clipLanded + entry.clipShifts));
+                }
+                macLanded |= entry.writesMac;
                 effects |= flagEffects(entry);
                 flagHead = (flagHead + 1u) & 15u;
                 flagCount = 0u;
@@ -526,6 +587,7 @@ namespace ps2x::vu1c
                 status = (status & 0xFCFu) | currentDi | (currentDi << 6);
                 fdivPending = false;
                 effects |= kEffectDivide;
+                qLanded = true;
             }
         }
 
@@ -562,7 +624,11 @@ namespace ps2x::vu1c
                         statusWritten = true;
                     }
                     if (entry.writesClip)
+                    {
                         newClip = entry.clip;
+                        clipLanded = static_cast<uint8_t>(std::min<uint32_t>(4u, clipLanded + entry.clipShifts));
+                    }
+                    macLanded |= entry.writesMac;
                     effects |= flagEffects(entry);
                 }
                 mac = newMac;
@@ -599,7 +665,11 @@ namespace ps2x::vu1c
                     if (entry.writesSticky)
                         status = (status & 0x03Fu) | (entry.status & 0xFC0u);
                     if (entry.writesClip)
+                    {
                         clip = entry.clip;
+                        clipLanded = static_cast<uint8_t>(std::min<uint32_t>(4u, clipLanded + entry.clipShifts));
+                    }
+                    macLanded |= entry.writesMac;
                     effects |= flagEffects(entry);
                     flagHead = (flagHead + 1u) & 15u;
                     --flagCount;
@@ -611,6 +681,7 @@ namespace ps2x::vu1c
                     status = (status & 0xFCFu) | currentDi | (currentDi << 6);
                     fdivPending = false;
                     effects |= kEffectDivide;
+                    qLanded = true;
                 }
             }
         }
@@ -999,6 +1070,7 @@ namespace ps2x::vu1c
             {
                 entry->clip = workingClip;
                 entry->writesClip = true;
+                entry->clipShifts = 1u;
             }
         }
 
@@ -1032,6 +1104,7 @@ namespace ps2x::vu1c
             {
                 entry->clip = workingClip;
                 entry->writesClip = true;
+                entry->clipShifts = 4u;
             }
         }
 
@@ -1063,6 +1136,7 @@ namespace ps2x::vu1c
                     return;
                 p = efuValue[pick];
                 efuValid[pick] = false;
+                pLanded = true;
             }
         }
 
@@ -1198,10 +1272,16 @@ namespace ps2x::vu1c
             const uint32_t source = (xgSource + xgCopied) % memSize;
             for (uint32_t index = 0; index < count; ++index)
                 noteMemRead((source + index * 16u) % memSize);
-            const uint32_t first = std::min(bytes, memSize - source);
-            std::memcpy(xgPacket + xgCopied, mem + source, first);
-            if (first < bytes)
-                std::memcpy(xgPacket + xgCopied + first, mem, bytes - first);
+            // LOCAL PATCH: a run longer than micro memory wraps round it more than once (a big GIF tag, seen at 21:9);
+            // the old two-part copy read past the end of `mem` then (crash in the VU1 worker).
+            uint32_t done = 0u, from = source;
+            while (done < bytes)
+            {
+                const uint32_t part = std::min(bytes - done, memSize - from);
+                std::memcpy(xgPacket + xgCopied + done, mem + from, part);
+                done += part;
+                from = 0u;
+            }
             xgCopied += bytes;
         }
 
@@ -1372,12 +1452,18 @@ namespace ps2x::vu1c
 
     using ProgramFn = void (*)(Exec &x, uint32_t entryPc);
 
+    // LOCAL PATCH (dynamic inputs): the VU1 bench's read-set check (PS2X_VU1_TRACKCHECK) makes in-place runs record
+    // their reads too.
+    extern bool g_vu1TrackTest;
+
     enum : uint8_t
     {
         kInputQ = 1u,
         kInputI = 2u,
         kInputMac = 4u,
         kInputStatus = 8u,
+        kInputP = 16u,        // LOCAL PATCH: the P register (dynamic inputs only)
+        kInputDynamic = 0x80u // LOCAL PATCH: the run records what it reads (Exec::trackRegs); the other fields are unused
     };
 
     // The state left by earlier runs that a run from an MSCAL/MSCNT entry point may read

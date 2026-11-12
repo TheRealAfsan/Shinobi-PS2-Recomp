@@ -13,6 +13,28 @@
 
 
 ------------------------------------------------------------------------------
+  WHAT'S NEW IN v0.4
+------------------------------------------------------------------------------
+
+  - DualSense / DualSense Edge HD haptics, USB and Bluetooth: footsteps left and
+    right, shuriken throws, sword hits, dash, the shuriken storm, ninja magic.
+    L2 adaptive trigger: it clicks through just before the magic fires.
+  - Close-up, over-the-shoulder camera (F3 in game).
+  - Performance overlay: FPS, frame time, 1% low, CPU, GPU, RAM, VRAM (F2).
+  - 8K resolution; most settings now change live in the F1 menu.
+  - New graphics options: blending accuracy, texture filtering, screen filter
+    (sharp / smooth / scanlines / CRT), dithering, mipmapping, upscaling fixes,
+    window mode (borderless / exclusive fullscreen / windowed).
+  - Faster: geometry on several CPU cores, a lighter sound chip, Low-end PC preset.
+  - Hotsuma's scarf in any colour (Mod Menu).
+  - The original game manual in the launcher; settings in tabs; the launcher is
+    fully usable with a controller and its window resizes and snaps.
+
+  IN GAME:  F1 menu   F2 performance overlay   F3 close-up camera   F4 manual
+            Alt+Enter / F11 window or full screen
+
+
+------------------------------------------------------------------------------
   1. WHAT THIS IS
 ------------------------------------------------------------------------------
 

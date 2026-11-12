@@ -373,6 +373,122 @@ namespace ps2x
                      static_cast<unsigned long long>(cycles1), runs.size(), static_cast<double>(cycles1) / runs.size(),
                      static_cast<unsigned long long>(total));
 
+        // LOCAL PATCH (dynamic inputs) PS2X_VU1_TRACKCHECK=1: for every run of a program that records its reads, run it
+        // once recording them, then several times more with every register, flag and lane it did NOT read set to
+        // random values. Memory, cycles, exit and every value the run itself wrote must come out the same each time:
+        // otherwise the read set missed something, and a worker run could be merged with a wrong result.
+        if (std::getenv("PS2X_VU1_TRACKCHECK"))
+        {
+            ps2x::vu1c::g_vu1TrackTest = true;
+            uint64_t seed = 0x2545F4914F6CDD1Dull;
+            auto rnd = [&]() { seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17; return seed; };
+            auto rndFloat = [&]() -> float
+            {
+                uint32_t bits = static_cast<uint32_t>(rnd());
+                bits = (bits & 0x807FFFFFu) | (static_cast<uint32_t>(100u + rnd() % 56u) << 23); // ordinary magnitudes
+                float f;
+                std::memcpy(&f, &bits, sizeof(f));
+                return f;
+            };
+            auto bitsOf = [](float f) { uint32_t b; std::memcpy(&b, &f, sizeof(b)); return b; };
+            size_t checked = 0, skipped = 0, bad = 0, trials = 0;
+            std::vector<uint8_t> dataA(PS2_VU1_DATA_SIZE);
+            for (size_t index = 0; index < runs.size(); ++index)
+            {
+                const Run &run = runs[index];
+                if (!run.program || !run.program->entries || run.program->entryCount == 0u ||
+                    (run.program->entries[0].other & ps2x::vu1c::kInputDynamic) == 0u)
+                {
+                    ++skipped;
+                    continue;
+                }
+                prepare(run);
+                const uint64_t cyclesA = execute(run);
+                const ps2x::vu1c::Exec *xa = vu1.lastCompiledExec();
+                if (!xa || xa->exit != ps2x::vu1c::Exit::Ended)
+                {
+                    ++skipped;
+                    continue;
+                }
+                const ps2x::vu1c::Exec a = *xa;
+                const VU1State stateA = vu1.state();
+                std::memcpy(dataA.data(), mem.getVU1Data(), PS2_VU1_DATA_SIZE);
+                ++checked;
+                for (int trial = 0; trial < 4; ++trial)
+                {
+                    ++trials;
+                    prepare(run);
+                    VU1State &st = vu1.state();
+                    for (uint32_t reg = 1; reg < 32u; ++reg)
+                        for (uint32_t c = 0; c < 4u; ++c)
+                        {
+                            const uint32_t bit = reg * 4u + c;
+                            if (((a.rdVf[bit / 64u] >> (bit % 64u)) & 1u) == 0u)
+                                st.vf[reg][c] = rndFloat();
+                        }
+                    for (uint32_t reg = 1; reg < 16u; ++reg)
+                        if (((a.rdVi >> reg) & 1u) == 0u)
+                            st.vi[reg] = static_cast<int32_t>(rnd() & 0xFFFFu);
+                    for (uint32_t c = 0; c < 4u; ++c)
+                        if (((a.rdAcc >> c) & 1u) == 0u)
+                            st.acc[c] = rndFloat();
+                    if ((a.rdAcc & 16u) == 0u)
+                        st.i = rndFloat();
+                    if ((a.rdOther & ps2x::vu1c::kInputQ) == 0u)
+                        st.q = rndFloat();
+                    if ((a.rdOther & ps2x::vu1c::kInputP) == 0u)
+                        st.p = rndFloat();
+                    if ((a.rdOther & ps2x::vu1c::kInputMac) == 0u)
+                        st.mac = static_cast<uint32_t>(rnd() & 0xFFFFu);
+                    if ((a.rdOther & ps2x::vu1c::kInputStatus) == 0u)
+                        st.status = static_cast<uint32_t>(rnd() & 0xFFFu);
+                    st.clip = (st.clip & a.rdClip) | (static_cast<uint32_t>(rnd()) & ~a.rdClip & 0xFFFFFFu);
+                    const uint64_t cyclesB = execute(run);
+                    const ps2x::vu1c::Exec *xb = vu1.lastCompiledExec();
+                    const VU1State &sb = vu1.state();
+                    std::string why;
+                    if (!xb || xb->exit != ps2x::vu1c::Exit::Ended || xb->exitPc != a.exitPc)
+                        why = "exit";
+                    else if (cyclesB != cyclesA)
+                        why = "cycles";
+                    else if (std::memcmp(dataA.data(), mem.getVU1Data(), PS2_VU1_DATA_SIZE) != 0)
+                        why = "memory";
+                    else
+                    {
+                        for (uint32_t bit = 4u; bit < 128u && why.empty(); ++bit)
+                            if (((a.wrVf[bit / 64u] >> (bit % 64u)) & 1u) != 0u &&
+                                bitsOf(sb.vf[bit / 4u][bit % 4u]) != bitsOf(stateA.vf[bit / 4u][bit % 4u]))
+                                why = "vf" + std::to_string(bit / 4u) + "xyzw"[bit % 4u];
+                        for (uint32_t reg = 1; reg < 16u && why.empty(); ++reg)
+                            if (((a.wrVi >> reg) & 1u) != 0u && sb.vi[reg] != stateA.vi[reg])
+                                why = "vi" + std::to_string(reg);
+                        for (uint32_t c = 0; c < 4u && why.empty(); ++c)
+                            if (((a.wrAcc >> c) & 1u) != 0u && bitsOf(sb.acc[c]) != bitsOf(stateA.acc[c]))
+                                why = "acc";
+                        if (why.empty() && a.macLanded && sb.mac != stateA.mac)
+                            why = "mac";
+                        if (why.empty() && a.qLanded && bitsOf(sb.q) != bitsOf(stateA.q))
+                            why = "q";
+                        if (why.empty() && a.pLanded && bitsOf(sb.p) != bitsOf(stateA.p))
+                            why = "p";
+                        const uint32_t ownClip = a.clipLanded >= 4u ? 0xFFFFFFu : ((1u << (6u * a.clipLanded)) - 1u);
+                        if (why.empty() && ((sb.clip ^ stateA.clip) & ownClip) != 0u)
+                            why = "clip";
+                    }
+                    if (!why.empty())
+                    {
+                        if (++bad <= 20u)
+                            std::fprintf(stderr, "[trackcheck] run %zu (%s, pc %04x) differs in %s with its unread state changed\n",
+                                         index, run.program->name, run.startPC, why.c_str());
+                        break;
+                    }
+                }
+            }
+            ps2x::vu1c::g_vu1TrackTest = false;
+            std::fprintf(stderr, "[trackcheck] %zu runs checked (%zu trials), %zu skipped, %zu FAILED\n", checked, trials,
+                         skipped, bad);
+        }
+
         // Timing passes, per program.
         struct Timing
         {

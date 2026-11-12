@@ -503,6 +503,7 @@ private:
     [[nodiscard]] ps2x::iop::RpcResult handleIopRpc(uint8_t *rdram, R5900Context *ctx, ps2x::iop::RpcRequest request);
     void notifyIopSifTransfer(uint8_t *rdram, const ps2x::iop::SifTransfer &transfer);
     void advanceIopEeCycles(uint64_t eeCycles) noexcept;
+    void iopIdlePoint() noexcept; // the game's CPU is about to wait: run the IOP work that was left for now
     void resetIop();
 
     friend class PS2IopTransport;

@@ -26,8 +26,10 @@
 #include "WebView2.h"
 #include "WebView2EnvironmentOptions.h"
 
+#include "launcher_dualsense.h"
 #include "launcher_ini.h"
 #include "launcher_iso.h"
+#include "launcher_manual.h"
 #include "launcher_settings_map.h"
 
 #include <algorithm>
@@ -258,6 +260,93 @@ namespace
 
     std::wstring fileUrl(const fs::path &path);
 
+    // ------------------------------------------------------------------ the game manual (the player's own PDF)
+
+    // LOCAL PATCH: "Manual" shows the manual as a book. The PDF is the player's own (launcher.ini [manual] pdf); its pages
+    // are drawn once into game/manual (launcher_manual.cpp). The page hears manual-progress:<i>|<n>, then
+    // manual:<pages>|<url of game/manual/page_> or manual-error:<text>.
+    std::atomic<bool> g_manualBusy{false};
+    std::thread g_manualThread;
+
+    fs::path manualFolder()
+    {
+        return g_gameDir / "manual";
+    }
+
+    fs::path browseForPdf()
+    {
+        ComPtr<IFileOpenDialog> dialog;
+        if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog))))
+            return {};
+        const COMDLG_FILTERSPEC filters[] = {{L"PDF manual (*.pdf)", L"*.pdf"}};
+        dialog->SetFileTypes(1, filters);
+        dialog->SetTitle(L"Select your Shinobi manual (PDF)");
+        DWORD options = 0;
+        dialog->GetOptions(&options);
+        dialog->SetOptions(options | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST | FOS_FORCEFILESYSTEM);
+        if (FAILED(dialog->Show(g_hwnd)))
+            return {};
+        ComPtr<IShellItem> item;
+        if (FAILED(dialog->GetResult(&item)))
+            return {};
+        PWSTR name = nullptr;
+        if (FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &name)) || !name)
+            return {};
+        fs::path path(name);
+        CoTaskMemFree(name);
+        return path;
+    }
+
+    void postManualReady(uint32_t pages)
+    {
+        std::error_code ec;
+        const auto stamp = fs::last_write_time(manualFolder() / "page_001.png", ec).time_since_epoch().count();
+        postFromThread(widen("manual:" + std::to_string(pages) + "|" + narrow(fileUrl(manualFolder() / "page_")) + "|" +
+                             std::to_string(static_cast<long long>(stamp % 1000000007LL))));
+    }
+
+    void openManual(bool choose)
+    {
+        if (g_manualBusy.load())
+            return;
+        const uint32_t cached = launcher::manual::cachedPages(manualFolder());
+        if (!choose && cached > 0u)
+        {
+            postManualReady(cached);
+            return;
+        }
+        fs::path pdf = fs::path(widen(g_mine.get("manual", "pdf", "")));
+        std::error_code ec;
+        // The manual that comes with the launcher (launcher_assets/manual.pdf), unless the player chose another one.
+        if (!choose && (pdf.empty() || !fs::exists(pdf, ec)) && fs::exists(g_root / "launcher_assets" / "manual.pdf", ec))
+            pdf = g_root / "launcher_assets" / "manual.pdf";
+        if (choose || pdf.empty() || !fs::exists(pdf, ec))
+        {
+            pdf = browseForPdf();
+            if (pdf.empty())
+            {
+                post(L"manual-cancel");
+                return;
+            }
+            g_mine.set("manual", "pdf", narrow(pdf.wstring()));
+            g_mine.save((g_root / "launcher.ini").string());
+        }
+        if (g_manualThread.joinable())
+            g_manualThread.join();
+        g_manualBusy = true;
+        post(L"manual-progress:0|0");
+        g_manualThread = std::thread([pdf]() {
+            const std::string error = launcher::manual::render(pdf, manualFolder(), 1600u, [](uint32_t i, uint32_t n) {
+                postFromThread(widen("manual-progress:" + std::to_string(i) + "|" + std::to_string(n)));
+            });
+            if (error.empty())
+                postManualReady(launcher::manual::cachedPages(manualFolder()));
+            else
+                postFromThread(widen("manual-error:" + error));
+            g_manualBusy = false;
+        });
+    }
+
     // The launcher's background music as a file:// URL, or empty when there is none.
     std::wstring musicUrl()
     {
@@ -482,6 +571,10 @@ namespace
             ShowWindow(g_hwnd, IsZoomed(g_hwnd) ? SW_RESTORE : SW_MAXIMIZE);
         else if (command == "close")
             PostMessageW(g_hwnd, WM_CLOSE, 0, 0);
+        else if (command == "manual")
+            openManual(false);
+        else if (command == "manualpick")
+            openManual(true);
         else if (command == "browseiso")
             browseGameFile();
         else if (command == "installiso")
@@ -630,7 +723,7 @@ namespace
                                                         if (const char *js = std::getenv("SHINOBI_LAUNCHER_JS"))
                                                             g_view->ExecuteScript(widen("setTimeout(()=>{" + std::string(js) + "},1200);").c_str(),
                                                                                   nullptr);
-                                                        SetTimer(g_hwnd, kShotTimer, 3000, nullptr);
+                                                        SetTimer(g_hwnd, kShotTimer, [] { const char *ms = std::getenv("SHINOBI_LAUNCHER_SHOT_MS"); return ms ? static_cast<UINT>(std::atoi(ms)) : 3000u; }(), nullptr);
                                                     }
                                                     return S_OK;
                                                 })
@@ -651,16 +744,31 @@ namespace
         case WM_SIZE:
             fitPage();
             return 0;
+        case WM_NCCALCSIZE:
+            // LOCAL PATCH: a resizable window (edges, Windows snap layouts, Win+arrows) that still looks frameless: the
+            // standard frame minus its caption. The side and bottom borders Windows 10/11 draw are invisible resize
+            // grips outside the picture; the title bar is the page's own.
+            if (wp)
+            {
+                auto *params = reinterpret_cast<NCCALCSIZE_PARAMS *>(lp);
+                const LONG top = params->rgrc[0].top;
+                DefWindowProcW(hwnd, msg, wp, lp);
+                params->rgrc[0].top = top + (IsZoomed(hwnd) ? GetSystemMetricsForDpi(SM_CYFRAME, GetDpiForWindow(hwnd)) +
+                                                                  GetSystemMetricsForDpi(SM_CXPADDEDBORDER, GetDpiForWindow(hwnd))
+                                                            : 0);
+                return 0;
+            }
+            break;
         case WM_GETMINMAXINFO:
         {
-            // A window with no frame would cover the taskbar when maximised: keep it to the monitor's work area.
-            auto *info = reinterpret_cast<MINMAXINFO *>(lp);
-            MONITORINFO mi{sizeof(mi)};
-            if (GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi))
+            // Not smaller than half the page's own size.
             {
-                info->ptMaxPosition = {mi.rcWork.left - mi.rcMonitor.left, mi.rcWork.top - mi.rcMonitor.top};
-                info->ptMaxSize = {mi.rcWork.right - mi.rcWork.left, mi.rcWork.bottom - mi.rcWork.top};
+                auto *minInfo = reinterpret_cast<MINMAXINFO *>(lp);
+                const UINT wdpi = GetDpiForWindow(hwnd) ? GetDpiForWindow(hwnd) : 96;
+                minInfo->ptMinTrackSize = {MulDiv(kPageWidth / 2, static_cast<int>(wdpi), 96),
+                                           MulDiv(kPageHeight / 2, static_cast<int>(wdpi), 96)};
             }
+            // (Maximised, Windows keeps the framed window to the work area itself.)
             return 0;
         }
         case WM_DPICHANGED:
@@ -844,8 +952,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show)
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.hbrBackground = CreateSolidBrush(RGB(0x16, 0x16, 0x1a));
     wc.lpszClassName = L"ShinobiLauncher";
-    wc.hIcon = static_cast<HICON>(LoadImageW(nullptr, (g_root / "launcher_assets" / "icon.ico").wstring().c_str(), IMAGE_ICON, 0,
-                                             0, LR_LOADFROMFILE | LR_DEFAULTSIZE));
+    // The icon built into the exe (launcher_icon.rc), else launcher_assets/icon.ico.
+    wc.hIcon = LoadIconW(instance, MAKEINTRESOURCEW(1));
+    if (!wc.hIcon)
+        wc.hIcon = static_cast<HICON>(LoadImageW(nullptr, (g_root / "launcher_assets" / "icon.ico").wstring().c_str(),
+                                                 IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE));
     wc.hIconSm = wc.hIcon;
     RegisterClassExW(&wc);
 
@@ -856,13 +967,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show)
     RECT work{};
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
     g_hwnd = CreateWindowExW(WS_EX_APPWINDOW, wc.lpszClassName, L"Shinobi (PS2 Recom) Launcher - by TheRealAfsan",
-                             WS_POPUP | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU, work.left + (work.right - work.left - w) / 2,
+                             WS_OVERLAPPEDWINDOW, work.left + (work.right - work.left - w) / 2,
                              work.top + (work.bottom - work.top - h) / 2, w, h, nullptr, nullptr, instance, nullptr);
     const int corner = 2; // DWMWCP_ROUND (Windows 11)
     DwmSetWindowAttribute(g_hwnd, 33 /* DWMWA_WINDOW_CORNER_PREFERENCE */, &corner, sizeof(corner));
     ShowWindow(g_hwnd, g_shotPath.empty() ? show : SW_SHOWNOACTIVATE);
     UpdateWindow(g_hwnd);
     createWebView();
+    launcher::dualsense::start([](const std::wstring &m) { postFromThread(m); });
 
     MSG message;
     while (GetMessageW(&message, nullptr, 0, 0))
@@ -874,6 +986,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show)
         g_unpackThread.join();
     if (g_installThread.joinable())
         g_installThread.join(); // a running set-up finishes (the copy is resumable: files already there are skipped)
+    if (g_manualThread.joinable())
+        g_manualThread.join();
     if (g_gameProcess)
         CloseHandle(g_gameProcess);
     CoUninitialize();

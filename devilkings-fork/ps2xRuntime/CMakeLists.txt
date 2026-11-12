@@ -403,6 +403,11 @@ add_library(ps2_runtime STATIC
     src/lib/ps2_intro_video.cpp
     src/lib/ps2_ingame_menu.cpp
     src/lib/ps2_adx_check.cpp
+    src/lib/ps2_scarf_colour.cpp
+    src/lib/ps2_haptics_trace.cpp
+    src/lib/ps2_dualsense.cpp
+    src/lib/ps2_dualsense_audio.cpp
+    src/lib/ps2_close_camera.cpp
     src/launcher/launcher_settings_map.cpp
     src/lib/games_database.cpp
 )
@@ -475,7 +480,43 @@ list(APPEND RUNNER_SRC_FILES ${RUNNER_MODULE_SRC_FILES})
 file(GLOB RUNNER_VU1_SRC_FILES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/runner/vu1/*.cpp"
 )
-list(APPEND RUNNER_SRC_FILES ${RUNNER_VU1_SRC_FILES})
+# LOCAL PATCH: compile the translated VU1 programs with clang-cl when it is installed (LLVM for Windows). Measured with
+# the VU1 replay benchmark (PS2X_VU1_BENCH, 622 recorded Shinobi runs): 6.6 vs 8.9 ns per VU cycle, about 26% less time on
+# the VIF1+VU1 thread, with the same checksum (bit-identical results). The objects link into the MSVC build as they are.
+# -DPS2X_VU1_CLANG=OFF compiles them with MSVC like everything else.
+option(PS2X_VU1_CLANG "Compile the translated VU1 programs with clang-cl when it is found" ON)
+set(_ps2x_vu1_clang "")
+if(MSVC AND PS2X_VU1_CLANG AND RUNNER_VU1_SRC_FILES)
+    find_program(PS2X_CLANG_CL clang-cl HINTS "$ENV{ProgramFiles}/LLVM/bin" "C:/Program Files/LLVM/bin")
+    if(PS2X_CLANG_CL)
+        set(_ps2x_vu1_clang "${PS2X_CLANG_CL}")
+    endif()
+endif()
+if(_ps2x_vu1_clang)
+    message(STATUS "VU1 programs: compiled with ${_ps2x_vu1_clang}")
+    set(_ps2x_vu1_objs "")
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/vu1clang")
+    foreach(_src IN LISTS RUNNER_VU1_SRC_FILES)
+        get_filename_component(_name "${_src}" NAME_WE)
+        set(_obj "${CMAKE_CURRENT_BINARY_DIR}/vu1clang/${_name}.obj")
+        add_custom_command(
+            OUTPUT "${_obj}"
+            COMMAND "${_ps2x_vu1_clang}" /nologo /c /O2 /Ob2 /Oi /Gy /Gw /GF /DNDEBUG /DWIN32 /D_WINDOWS /EHsc
+                    -std:c++20 /MD /arch:AVX2 /GS- /Z7 -DPLATFORM_DESKTOP -DPS2X_HAVE_PGS=1
+                    "-I${CMAKE_CURRENT_SOURCE_DIR}/include" "-I${CMAKE_CURRENT_SOURCE_DIR}/src/lib/Kernel"
+                    "-I${CMAKE_CURRENT_SOURCE_DIR}/../ps2xIOP/include"
+                    "${_src}" "/Fo${_obj}"
+            DEPENDS "${_src}" "${CMAKE_CURRENT_SOURCE_DIR}/include/runtime/ps2_vu1_compiled.h"
+            COMMENT "clang-cl ${_name}"
+            VERBATIM)
+        list(APPEND _ps2x_vu1_objs "${_obj}")
+    endforeach()
+    set_source_files_properties(${_ps2x_vu1_objs} PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
+    list(APPEND RUNNER_SRC_FILES ${_ps2x_vu1_objs})
+    set(RUNNER_VU1_SRC_FILES "") # the MSVC options further down are for MSVC-compiled programs only
+else()
+    list(APPEND RUNNER_SRC_FILES ${RUNNER_VU1_SRC_FILES})
+endif()
 # LOCAL PATCH: Shinobi's translated programs are huge (3-5 MB each); batching them into one unity translation unit made
 # a single compiler process run for an hour and use many GB. As separate sources they compile in parallel.
 if(RUNNER_VU1_SRC_FILES)
@@ -559,6 +600,10 @@ endif()
 # PS2X_RUNNER_ICON=<file.ico>: the game's icon for the Windows executable. GLFW gives its windows
 # the resource named GLFW_ICON, so the window and the taskbar show it too.
 set(PS2X_RUNNER_ICON "" CACHE FILEPATH "Icon (.ico) embedded in the Windows runner executable")
+# LOCAL PATCH: Shinobi's own icon by default (launcher_assets/icon.ico).
+if(WIN32 AND NOT PS2X_RUNNER_ICON AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../launcher_assets/icon.ico")
+    set(PS2X_RUNNER_ICON "${CMAKE_CURRENT_SOURCE_DIR}/../../launcher_assets/icon.ico")
+endif()
 if(WIN32 AND PS2X_RUNNER_ICON)
     file(TO_CMAKE_PATH "${PS2X_RUNNER_ICON}" PS2X_RUNNER_ICON_PATH)
     file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/ps2x_runner_icon.rc" "GLFW_ICON ICON \"${PS2X_RUNNER_ICON_PATH}\"\n")
@@ -712,13 +757,17 @@ if(WIN32 AND NOT PS2X_IS_VITA)
     add_executable(ShinobiLauncher WIN32
         src/launcher/launcher_webview.cpp
         src/launcher/launcher_iso.cpp
+        src/launcher/launcher_manual.cpp
         src/launcher/launcher_settings_map.cpp
         src/launcher/launcher_ini.cpp
+        src/launcher/launcher_dualsense.cpp
+        src/launcher/launcher_icon.rc
     )
     target_compile_features(ShinobiLauncher PRIVATE cxx_std_20)
     target_include_directories(ShinobiLauncher PRIVATE "${PS2X_WEBVIEW2_DIR}/include")
     target_link_libraries(ShinobiLauncher PRIVATE "${PS2X_WEBVIEW2_DIR}/x64/WebView2LoaderStatic.lib"
-        version shlwapi ole32 user32 dwmapi shell32 advapi32)
+        version shlwapi ole32 user32 dwmapi shell32 advapi32
+        windowsapp) # LOCAL PATCH: Windows.Data.Pdf for the manual (launcher_manual.cpp)
     if(MSVC)
         target_compile_options(ShinobiLauncher PRIVATE /utf-8)
     endif()

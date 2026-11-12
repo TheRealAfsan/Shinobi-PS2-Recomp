@@ -172,6 +172,11 @@ typedef struct RrvPcsx2GsBridgeStats {
 typedef uint64_t RrvPcsx2GsPrivRegs[RRV_PCSX2_GS_BRIDGE_PRIV_REG_COUNT];
 
 RRV_PCSX2_GS_BRIDGE_API uint32_t rrv_pcsx2_gs_bridge_version(void);
+// LOCAL PATCH: re-applies the RRV_PCSX2_GS_* renderer options (scale, anisotropy, filter, edge AA, blending) to the
+// running renderer with PCSX2's GSUpdateConfig. 1 on success.
+RRV_PCSX2_GS_BRIDGE_API int rrv_pcsx2_gs_bridge_update_options(RrvPcsx2GsBridge* bridge, char* error,
+                                                               uint32_t error_capacity);
+
 
 // Optional exports resolved by the dedicated-owner candidate. ABI 5 layouts
 // and the default inline path are unchanged. All GS calls including create,

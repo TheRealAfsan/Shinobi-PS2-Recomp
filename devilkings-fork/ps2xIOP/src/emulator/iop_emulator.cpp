@@ -33,8 +33,13 @@
 #include <sstream>
 #include <utility>
 
+#include <atomic>
+
 namespace ps2x::iop::detail
 {
+    // Host nanoseconds spent running the IOP (timed runs only: when the runtime has set deferral).
+    static std::atomic<uint64_t> g_iopRunNs{0};
+
     namespace
     {
         constexpr uint32_t kRamSize = IopMemory::RamSize;
@@ -531,10 +536,13 @@ namespace ps2x::iop::detail
         // Diagnostics: PS2X_IOP_PC_STATS samples the IOP program counter every 1024
         // instructions and, about every five seconds, prints the busiest addresses with
         // the module holding them and the instruction rate.
-        static bool pcStatsEnabled()
+        // Also switched on for a few seconds by the hot monitor (see timedRun) when the IOP costs far more than usual.
+        bool hotSampling = false;
+        bool hotSamplingRestart = false;
+        bool pcStatsEnabled() const
         {
             static const bool s_enabled = std::getenv("PS2X_IOP_PC_STATS") != nullptr;
-            return s_enabled;
+            return s_enabled || hotSampling;
         }
 
         void samplePc(uint32_t pc)
@@ -542,6 +550,13 @@ namespace ps2x::iop::detail
             static std::unordered_map<uint32_t, uint64_t> s_samples;
             static auto s_last = std::chrono::steady_clock::now();
             static uint64_t s_lastInstructions = 0;
+            if (hotSamplingRestart)
+            {
+                hotSamplingRestart = false;
+                s_samples.clear();
+                s_last = std::chrono::steady_clock::now();
+                s_lastInstructions = totalInstructions;
+            }
             ++s_samples[pc];
             const auto now = std::chrono::steady_clock::now();
             const double seconds = std::chrono::duration<double>(now - s_last).count();
@@ -580,6 +595,7 @@ namespace ps2x::iop::detail
             s_samples.clear();
             s_last = now;
             s_lastInstructions = totalInstructions;
+            hotSampling = false; // one report per trigger; the monitor rearms after its cool-down
         }
 
         uint32_t runCpu(CpuState &cpu, uint32_t instructionBudget)
@@ -972,6 +988,67 @@ namespace ps2x::iop::detail
         uint64_t totalInstructions = 0;
         uint64_t eeCycleCarry = 0;
 
+        // LOCAL PATCH (frame pacing): the runtime may ask for bigger batches and a time budget (setDeferral). The IOP then
+        // runs in batches of deferMinBatch cycles; once it has used deferBudgetNs of host time since the game last idled,
+        // further cycles wait (up to deferMaxCycles) for the next idle point, an EE<->IOP interaction (every entry point
+        // flushes first, exactly as before) or the cap. Emulated time and the order of events are unchanged: only where
+        // in the host frame the IOP does its work. Off (0) by default, which is the old behaviour.
+        uint64_t deferMinBatch = 0;
+        uint64_t deferBudgetNs = 0;
+        uint64_t deferMaxCycles = 0;
+        uint64_t workNs = 0; // host time used by the IOP since the last idle point
+
+        // Hot monitor: host time per wall second; three seconds in a row above the limit switch PC sampling on once.
+        std::chrono::steady_clock::time_point hotWindowStart{};
+        std::chrono::steady_clock::time_point hotCooldownUntil{};
+        uint64_t hotWindowNs = 0;
+        uint32_t hotSeconds = 0;
+
+        void timedRun(uint64_t iopCycles) noexcept
+        {
+            const auto start = std::chrono::steady_clock::now();
+            runCycles(iopCycles);
+            const auto end = std::chrono::steady_clock::now();
+            const uint64_t ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count());
+            workNs += ns;
+            g_iopRunNs.fetch_add(ns, std::memory_order_relaxed);
+            hotWindowNs += ns;
+            if (hotWindowStart == std::chrono::steady_clock::time_point{})
+                hotWindowStart = end;
+            const double window = std::chrono::duration<double>(end - hotWindowStart).count();
+            if (window >= 1.0)
+            {
+                const double msPerSecond = static_cast<double>(hotWindowNs) / 1.0e6 / window;
+                hotSeconds = msPerSecond > 330.0 ? hotSeconds + 1u : 0u;
+                if (hotSeconds >= 3u && !hotSampling && end >= hotCooldownUntil)
+                {
+                    std::fprintf(stderr, "[iop-hot] the sound processor is using %.0f ms of every second (normal is about 200): "
+                                         "sampling where for 5 seconds\n", msPerSecond);
+                    hotSampling = true;
+                    hotSamplingRestart = true;
+                    hotCooldownUntil = end + std::chrono::seconds(120);
+                    hotSeconds = 0u;
+                }
+                hotWindowStart = end;
+                hotWindowNs = 0u;
+            }
+        }
+
+        // The game's CPU has nothing to run: do the waiting IOP work now, in time that would be slept away.
+        void idleFlush() noexcept
+        {
+            const uint64_t iopCycles = eeCycleCarry / 8u;
+            if (iopCycles)
+            {
+                eeCycleCarry %= 8u;
+                if (deferMinBatch)
+                    timedRun(iopCycles);
+                else
+                    runCycles(iopCycles);
+            }
+            workNs = 0u;
+        }
+
         // Run EE cycles that runEeCycles() batched, so anything that observes or
         // talks to the IOP sees it at the EE's current time.
         void flushPendingEeCycles() noexcept
@@ -979,7 +1056,12 @@ namespace ps2x::iop::detail
             const uint64_t iopCycles = eeCycleCarry / 8u;
             eeCycleCarry %= 8u;
             if (iopCycles)
-                runCycles(iopCycles);
+            {
+                if (deferMinBatch)
+                    timedRun(iopCycles);
+                else
+                    runCycles(iopCycles);
+            }
         }
         CpuState *activeCpu = nullptr;
         std::string lastError;
@@ -1028,15 +1110,45 @@ namespace ps2x::iop::detail
         // call costs far more than the emulated work, so batch small advances.
         constexpr uint64_t kMinIopBatchCycles = 128u;
         const uint64_t total = m_impl->eeCycleCarry + eeCycles;
-        if (total / 8u < kMinIopBatchCycles)
+        const uint64_t minBatch = m_impl->deferMinBatch ? m_impl->deferMinBatch : kMinIopBatchCycles;
+        if (total / 8u < minBatch)
         {
             m_impl->eeCycleCarry = total;
+            return;
+        }
+        if (m_impl->deferMinBatch)
+        {
+            // Over this stretch's time budget: leave the work for the idle point, unless too much is waiting already.
+            if (m_impl->workNs >= m_impl->deferBudgetNs && total / 8u < m_impl->deferMaxCycles)
+            {
+                m_impl->eeCycleCarry = total;
+                return;
+            }
+            m_impl->eeCycleCarry = total % 8u;
+            m_impl->timedRun(total / 8u);
             return;
         }
         const uint64_t iopCycles = total / 8u;
         m_impl->eeCycleCarry = total % 8u;
         if (iopCycles)
             m_impl->runCycles(iopCycles);
+    }
+
+    void IopEmulator::setDeferral(uint64_t minBatchCycles, uint64_t budgetNanoseconds, uint64_t maxDeferredCycles) noexcept
+    {
+        m_impl->deferMinBatch = minBatchCycles;
+        m_impl->deferBudgetNs = budgetNanoseconds;
+        m_impl->deferMaxCycles = std::max<uint64_t>(maxDeferredCycles, minBatchCycles);
+    }
+
+    void IopEmulator::idleFlush() noexcept
+    {
+        m_impl->idleFlush();
+    }
+
+    uint64_t iopRunNanoseconds() noexcept
+    {
+        return g_iopRunNs.load(std::memory_order_relaxed);
     }
 
     RpcResult IopEmulator::handleRpc(const RpcRequest &request)

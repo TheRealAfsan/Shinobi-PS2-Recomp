@@ -2463,6 +2463,13 @@ void EeScheduler::processEvent(const EeEvent &event)
             SET_GPR_U32(&invocation.context, 31, 0u);
             queueInvocation(std::move(invocation));
         }
+        {
+            // LOCAL PATCH: an aspect ratio changed in the F1 menu widens the camera now (see ps2_runtime.cpp).
+            extern void ps2xWidescreenVsync(PS2Runtime &runtime);
+            ps2xWidescreenVsync(m_runtime);
+            extern void ps2xHapticTraceVsync(uint64_t tick);
+            ps2xHapticTraceVsync(m_vsyncTick);
+        }
         pollGsFinishIrq();
         dispatchIrq(false, 2u);
         break;
@@ -2564,6 +2571,16 @@ void EeScheduler::writeGuestU32(uint32_t address, uint32_t value)
 
 void EeScheduler::waitForEvent()
 {
+    {
+        std::lock_guard early(m_eventMutex);
+        if (!m_events.empty() || m_stopRequested.load(std::memory_order_acquire))
+        {
+            return;
+        }
+    }
+    // LOCAL PATCH (frame pacing): nothing to run, so this is where the IOP work left over from the busy part of the
+    // frame is done (see PS2Runtime::iopIdlePoint). It may raise an event, which the check below then returns for.
+    m_runtime.iopIdlePoint();
     std::unique_lock lock(m_eventMutex);
     if (!m_events.empty() || m_stopRequested.load(std::memory_order_acquire))
     {

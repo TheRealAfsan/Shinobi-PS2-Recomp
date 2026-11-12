@@ -1,7 +1,5 @@
 # Shinobi (PS2) Recomp
 
-<a href="https://recomplauncher.com"><picture><source media="(prefers-color-scheme: dark)" srcset="https://recomplauncher.com/assets/press/launcher/badge-light.svg"><img alt="Get it on RecompLauncher" src="https://recomplauncher.com/assets/press/launcher/badge-dark.svg" height="48"></picture></a>
-
 **v0.4 is out:** a brand-new launcher, mod support, DualSense HD haptics, a close-up camera, 8K and the game manual built in. 🔥
 
 <p align="center">

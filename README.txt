@@ -27,10 +27,11 @@
     window mode (borderless / exclusive fullscreen / windowed).
   - Faster: geometry on several CPU cores, a lighter sound chip, Low-end PC preset.
   - Hotsuma's scarf in any colour (Mod Menu).
-  - The original game manual in the launcher; settings in tabs; the launcher is
-    fully usable with a controller and its window resizes and snaps.
+  - Read your own copy of the game manual (PDF) in the launcher, with page-
+    turning and zoom (F4 in game); settings in tabs; the launcher is fully
+    usable with a controller and its window resizes and snaps.
 
-  IN GAME:  F1 menu   F2 performance overlay   F3 close-up camera   F4 manual
+  IN GAME:  F1 menu   F2 performance overlay   F3 close-up camera   F4 manual (your own PDF)
             Alt+Enter / F11 window or full screen
 
 

@@ -2,7 +2,7 @@
 
 [![Verified developer on RecompStore](https://recompstore.com/assets/press/verified-dark.svg)](https://recompstore.com/dev/therealafsan)
 
-**v0.4 is out:** a brand-new launcher, mod support, DualSense HD haptics, a close-up camera, 8K and the game manual built in. 🔥
+**v0.4.1 is out:** a brand-new launcher, mod support, DualSense HD haptics, a close-up camera and 8K. 🔥
 
 <p align="center">
 <img src="docs/screenshots/v0.4/launcher-display.jpg" width="100%">
@@ -34,6 +34,8 @@ The game's own program is translated ("recompiled") to run natively on Windows. 
 
 ## v0.4: the biggest update yet
 
+> **v0.4.1:** the game manual is no longer included in the download. Open your own Shinobi manual PDF with the launcher's Manual button: page-turning, zoom and F4 work the same.
+
 v0.4 is here, as promised! Grab a drink.
 
 ### The big ones
@@ -42,7 +44,7 @@ v0.4 is here, as promised! Grab a drink.
 2. **Mod support.** Change Hotsuma's scarf to any colour you like, live, plus a new close-up camera mod, all switchable in game.
 3. **Full DualSense HD haptics, wired AND wireless.** Every footstep left and right, every shuriken, every sword hit, and an L2 trigger that clicks before your magic fires.
 4. **A close-up, over-the-shoulder camera (F3)** for more intimate combat. It glides in and glides back out.
-5. **The original game manual, built in.** It has real page-turning and zoom, and **F4** in game slides it up over the action.
+5. **Read your own game manual in the launcher.** Open your Shinobi manual PDF once: real page-turning and zoom, and **F4** in game slides it up over the action.
 6. **Performance overlay (F2):** FPS, frame time, 1% lows, CPU, GPU, RAM and VRAM, NVIDIA-style.
 7. **Big performance work:** geometry now runs across multiple CPU cores, the sound chip is 30% cheaper, and there's a new Low-end PC preset.
 8. **8K resolution** and a whole set of new graphics options.
@@ -63,7 +65,7 @@ v0.4 is here, as promised! Grab a drink.
   - A clear red highlight shows where you are.
 - The window resizes, maximises and snaps (50/50 with another window).
 - Window Mode: Borderless, Exclusive Fullscreen or Windowed.
-- The original Shinobi manual, with page-flip animation, mouse-wheel zoom and controller page-turning.
+- Your own Shinobi manual (PDF), with page-flip animation, mouse-wheel zoom and controller page-turning.
 - A Game File checklist plus an "I own this copy" tick, so you know your disc image is right.
 - A proper Shinobi icon on the launcher and the game.
 - It checks your CPU supports AVX2 and tells you if it doesn't.
@@ -75,7 +77,7 @@ v0.4 is here, as promised! Grab a drink.
 </tr>
 <tr>
 <td width="50%"><img src="docs/screenshots/v0.4/launcher-controller-haptics.jpg"><br><sub><b>Controller:</b> DualSense haptics, haptic strength, L2 trigger resistance.</sub></td>
-<td width="50%"><img src="docs/screenshots/v0.4/launcher-manual.jpg"><br><sub><b>The original manual,</b> built in, with real page-turning and zoom. F4 in game.</sub></td>
+<td width="50%"><img src="docs/screenshots/v0.4/scarf-blue.jpg"><br><sub><b>Mods:</b> Hotsuma in a blue scarf, picked live.</sub></td>
 </tr>
 </table>
 
@@ -141,7 +143,7 @@ I didn't want "rumble". I wanted it to feel like a modern PS5 game, so I built i
 | **F1** (or Select+Start) | Menu: settings, mods and controller, all live (pauses the game) |
 | **F2** | Performance overlay |
 | **F3** | Close-up camera |
-| **F4** | The game manual |
+| **F4** | Your game manual (open your PDF once in the launcher) |
 | **Alt+Enter / F11** | Window or full screen |
 
 Pressing F2 or F3 slides a little notice down in the corner, so you know it's on or off.
@@ -202,7 +204,7 @@ Everything can be changed in **Configure Controller** (and the in-game menu, F1)
 
 - **Mouse:** moves the camera; left click = Square, right click = Circle; **F10** switches it on and off.
 - **Controllers:** DualSense, DualSense Edge, DualShock 4 and Xbox (360, One, Series) use the standard layout. The DualSense Edge is the one tested; is a controller not working for you? Let me know.
-- **In game:** F1 or Select+Start = menu (pauses), F2 = performance overlay, F3 = close-up camera, F4 = manual, Alt+Enter or F11 = window / full screen, F8 = mark a problem in the log.
+- **In game:** F1 or Select+Start = menu (pauses), F2 = performance overlay, F3 = close-up camera, F4 = your manual, Alt+Enter or F11 = window / full screen, F8 = mark a problem in the log.
 
 ## Saves
 

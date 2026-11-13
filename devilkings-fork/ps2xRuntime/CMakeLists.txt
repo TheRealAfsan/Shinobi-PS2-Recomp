@@ -408,6 +408,7 @@ add_library(ps2_runtime STATIC
     src/lib/ps2_dualsense.cpp
     src/lib/ps2_dualsense_audio.cpp
     src/lib/ps2_close_camera.cpp
+    src/lib/ps2_estimate_trace.cpp
     src/launcher/launcher_settings_map.cpp
     src/lib/games_database.cpp
 )

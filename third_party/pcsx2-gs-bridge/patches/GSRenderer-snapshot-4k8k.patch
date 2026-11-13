@@ -1,0 +1,102 @@
+--- a/pcsx2/GS/Renderers/Common/GSRenderer.cpp
++++ b/pcsx2/GS/Renderers/Common/GSRenderer.cpp
+@@ -1067,6 +1067,20 @@
+ 		{
+ 			// uncorrected aspect is only available at internal resolution
+ 			draw_rect = GSVector4(0.0f, 0.0f, static_cast<float>(current->GetWidth()), static_cast<float>(current->GetHeight()));
++			// LOCAL PATCH (Shinobi recomp, 4K/8K): RRV_PCSX2_GS_SNAPSHOT_MAX=<w>x<h> caps the copy brought back to the CPU
++			// every frame. The picture is shrunk on the GPU with its shape kept (the window would shrink it anyway),
++			// so a 12x (8K) render is no longer read back at full size (~165 MB a frame).
++			if (const char* cap = std::getenv("RRV_PCSX2_GS_SNAPSHOT_MAX"); cap && cap[0])
++			{
++				unsigned max_w = 0, max_h = 0;
++				if (std::sscanf(cap, "%ux%u", &max_w, &max_h) == 2 && max_w >= 64 && max_h >= 64)
++				{
++					const float w = draw_rect.z, h = draw_rect.w;
++					const float scale = std::min(1.0f, std::min(static_cast<float>(max_w) / w, static_cast<float>(max_h) / h));
++					if (scale < 1.0f)
++						draw_rect = GSVector4(0.0f, 0.0f, std::max(1.0f, std::floor(w * scale)), std::max(1.0f, std::floor(h * scale)));
++				}
++			}
+ 		}
+ 	}
+ 	else
+@@ -1083,11 +1097,54 @@
+ 	GSTexture* rt = g_gs_device->CreateRenderTarget(draw_width, draw_height, GSTexture::Format::Color, false);
+ 	if (rt)
+ 	{
+-		std::unique_ptr<GSDownloadTexture> dl(g_gs_device->CreateDownloadTexture(draw_width, draw_height, GSTexture::Format::Color));
++		// LOCAL PATCH (Shinobi recomp, 4K/8K): the download (staging) texture is kept between calls and only re-created
++		// when the size changes - the bridge snapshots every frame, and creating a full-size staging texture each time
++		// churned hundreds of MB of graphics memory per second at high resolutions.
++		// Raw pointer on purpose: never destroyed at exit (the device may already be gone), and one made by an
++		// older device is let go rather than freed through a dead device.
++		static GSDownloadTexture* s_dl = nullptr;
++		static u32 s_dl_w = 0, s_dl_h = 0;
++		static GSDevice* s_dl_device = nullptr;
++		if (!s_dl || s_dl_w != draw_width || s_dl_h != draw_height || s_dl_device != g_gs_device.get())
++		{
++			if (s_dl && s_dl_device == g_gs_device.get())
++				delete s_dl;
++			s_dl = g_gs_device->CreateDownloadTexture(draw_width, draw_height, GSTexture::Format::Color).release();
++			s_dl_w = draw_width;
++			s_dl_h = draw_height;
++			s_dl_device = g_gs_device.get();
++		}
++		GSDownloadTexture* const dl = s_dl;
+ 		if (dl)
+ 		{
+ 			const GSVector4i rc(0, 0, draw_width, draw_height);
+-			g_gs_device->StretchRect(current, src_uv, rt, GSVector4(rc), ShaderConvert::TRANSPARENCY_FILTER, Biln);
++			// LOCAL PATCH (4K/8K quality): when the picture is shrunk a lot (8K drawn, 1440p copied), one bilinear step
++			// reads only 4 of the many source pixels under each output pixel - the extra detail is thrown away and edges
++			// shimmer. Halving steps first (each bilinear 2:1 step is an exact average of 2x2 pixels) keep it all.
++			GSTexture* src_tex = current;
++			GSVector4 src_box = src_uv;
++			GSTexture* temps[8] = {};
++			int n_temps = 0;
++			{
++				int sw = src_rect.width(), sh = src_rect.height();
++				const char* halving = std::getenv("RRV_PCSX2_GS_SNAPSHOT_HALVING"); // =0: one step (for comparison)
++				while (!(halving && halving[0] == '0') && n_temps < 8 && sw >= static_cast<int>(draw_width) * 2 && sh >= static_cast<int>(draw_height) * 2)
++				{
++					sw /= 2;
++					sh /= 2;
++					GSTexture* half = g_gs_device->CreateRenderTarget(sw, sh, GSTexture::Format::Color, false);
++					if (!half)
++						break;
++					g_gs_device->StretchRect(src_tex, src_box, half, GSVector4(0.0f, 0.0f, static_cast<float>(sw), static_cast<float>(sh)),
++						ShaderConvert::COPY, Biln);
++					temps[n_temps++] = half;
++					src_tex = half;
++					src_box = GSVector4(0.0f, 0.0f, 1.0f, 1.0f);
++				}
++			}
++			g_gs_device->StretchRect(src_tex, src_box, rt, GSVector4(rc), ShaderConvert::TRANSPARENCY_FILTER, Biln);
++			for (int i = 0; i < n_temps; i++)
++				g_gs_device->Recycle(temps[i]);
+ 			dl->CopyFromTexture(rc, rt, rc, 0);
+ 			dl->Flush();
+ 
+@@ -1095,12 +1152,19 @@
+ 			{
+ 				const u32 pad_x = (image_width - draw_width) / 2;
+ 				const u32 pad_y = (image_height - draw_height) / 2;
+-				pixels->clear();
+-				pixels->resize(image_width * image_height, 0);
++				// LOCAL PATCH: no clearing when the picture fills the image (internal size / cropped): it is all overwritten.
++				if (image_width == draw_width && image_height == draw_height)
++					pixels->resize(static_cast<size_t>(image_width) * image_height);
++				else
++				{
++					pixels->clear();
++					pixels->resize(static_cast<size_t>(image_width) * image_height, 0);
++				}
+ 				*width = image_width;
+ 				*height = image_height;
+ 				StringUtil::StrideMemCpy(pixels->data() + pad_y * image_width + pad_x, image_width * sizeof(u32), dl->GetMapPointer(),
+ 					dl->GetMapPitch(), draw_width * sizeof(u32), draw_height);
++				dl->Unmap();
+ 
+ 				g_gs_device->Recycle(rt);
+ 				return true;

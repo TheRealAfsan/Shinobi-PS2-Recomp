@@ -48,6 +48,9 @@ extern "C" void rrv_pcsx2_gs_bridge_initialize_host_console()
     if (!initialized)
     {
         GSRunner::InitializeConsole();
+        // LOCAL PATCH: RRV_PCSX2_GS_LOG_FILE=<path> also writes PCSX2's own log there (why a renderer failed to open).
+        if (const char* path = std::getenv("RRV_PCSX2_GS_LOG_FILE"); path && path[0])
+            Log::SetFileOutputLevel(LOGLEVEL_DEBUG, path);
         initialized = true;
     }
 }

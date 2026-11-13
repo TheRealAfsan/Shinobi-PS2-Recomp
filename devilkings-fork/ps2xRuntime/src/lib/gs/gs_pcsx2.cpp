@@ -181,6 +181,31 @@ namespace ps2x::pcsx2gs
             return s_on;
         }
 
+        // LOCAL PATCH (4K/8K guard): the largest render scale (<= wanted) this graphics card's own memory can hold.
+        // Each step of scale makes every render target scale^2 bigger (12x = 7680x5376 = 165 MB per target), and a
+        // card that runs out shows green/pink textures or a black screen. Budget: 60% of the card's dedicated memory
+        // against ~12 full-size targets plus 400 MB for the rest. PS2X_VRAM_GUARD=0 turns it off.
+        int vramSafeScale(int wanted)
+        {
+            if (wanted <= 2)
+                return wanted;
+            const char *off = std::getenv("PS2X_VRAM_GUARD");
+            if (off && off[0] == '0')
+                return wanted;
+            const char *fake = std::getenv("PS2X_VRAM_MB"); // testing: pretend the card has this much
+            const double vramMb = fake && fake[0] ? std::atof(fake) : ps2x::sysstats::dedicatedVramBytes() / (1024.0 * 1024.0);
+            if (vramMb <= 0.0)
+                return wanted; // unknown: leave the player's choice alone
+            const double budgetMb = vramMb * 0.6;
+            int scale = wanted;
+            while (scale > 2 && 1.147 * scale * scale * 12.0 + 400.0 > budgetMb)
+                --scale;
+            if (scale != wanted)
+                std::fprintf(stderr, "[pcsx2gs] render scale %dx lowered to %dx: the graphics card has %.0f MB of video memory\n",
+                             wanted, scale, vramMb);
+            return scale;
+        }
+
         bool wantedNow()
         {
             const char *value = std::getenv("PS2X_RENDERER");
@@ -357,6 +382,16 @@ namespace ps2x::pcsx2gs
             HMODULE module = LoadLibraryExA(dllPath.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
             if (!module)
                 return false;
+            // LOCAL PATCH (Vulkan): PCSX2 loads its shader compiler (shaderc_shared.dll) by name only when the Vulkan
+            // renderer starts, and Windows then searches the exe's folder, not the bridge's - so Vulkan always failed
+            // ("Failed to compile utility pipelines") and the game fell back to the slow software renderer. Loading it
+            // here from the bridge's folder makes the later by-name load find the module already in memory.
+            {
+                const size_t bslash = dllPath.find_last_of("\\/");
+                const std::string shaderc = (bslash == std::string::npos ? std::string() : dllPath.substr(0, bslash + 1u)) + "shaderc_shared.dll";
+                if (!LoadLibraryExA(shaderc.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH))
+                    std::fprintf(stderr, "[pcsx2gs] note: %s could not be loaded (Vulkan needs it)\n", shaderc.c_str());
+            }
             const auto get = [&](const char *name) { return reinterpret_cast<void *>(GetProcAddress(module, name)); };
             api.version = reinterpret_cast<decltype(api.version)>(get("rrv_pcsx2_gs_bridge_version"));
             api.create = reinterpret_cast<decltype(api.create)>(get("rrv_pcsx2_gs_bridge_create"));
@@ -427,7 +462,12 @@ namespace ps2x::pcsx2gs
                 const int scale = scaleText ? std::atoi(scaleText) : 2;
                 if (scale >= 2 && scale <= 12) // LOCAL PATCH: 12 = 8K (7680x5376)
                 {
-                    s.fullFrameScale = scale;
+                    const int safe = vramSafeScale(scale);
+                    if (safe != scale)
+                    {
+                        _putenv_s("RRV_PCSX2_GS_FULL_SCALE", std::to_string(safe).c_str());
+                    }
+                    s.fullFrameScale = safe;
                     if (!std::getenv("RRV_PCSX2_GS_FULL_SCALE"))
                         _putenv_s("RRV_PCSX2_GS_FULL_SCALE", std::to_string(scale).c_str());
                 }
@@ -459,6 +499,42 @@ namespace ps2x::pcsx2gs
                         const char digit[2] = {static_cast<char>('0' + value), '\0'};
                         _putenv_s("RRV_PCSX2_GS_INTERLACE", digit);
                     }
+                }
+            }
+#endif
+#ifdef _WIN32
+            // LOCAL PATCH (4K/8K): the picture brought back from the graphics card each frame is capped at the largest
+            // screen's real resolution (shape kept). Above that the window can only shrink it again, and at 6x/12x the
+            // full-size copy (41 / 165 MB a frame) was what dropped 4K/8K to a few frames a second.
+            // PS2X_PCSX2_SNAPSHOT_MAX=<w>x<h> overrides, =0 turns the cap off.
+            if (!std::getenv("RRV_PCSX2_GS_SNAPSHOT_MAX"))
+            {
+                const char *forced = std::getenv("PS2X_PCSX2_SNAPSHOT_MAX");
+                std::string cap = forced ? forced : "";
+                if (cap.empty())
+                {
+                    DWORD maxW = 0, maxH = 0;
+                    DISPLAY_DEVICEA dd{};
+                    dd.cb = sizeof(dd);
+                    for (DWORD i = 0; EnumDisplayDevicesA(nullptr, i, &dd, 0); ++i, dd.cb = sizeof(dd))
+                    {
+                        if (!(dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP))
+                            continue;
+                        DEVMODEA dm{};
+                        dm.dmSize = sizeof(dm);
+                        if (EnumDisplaySettingsA(dd.DeviceName, ENUM_CURRENT_SETTINGS, &dm))
+                        {
+                            maxW = std::max(maxW, dm.dmPelsWidth);
+                            maxH = std::max(maxH, dm.dmPelsHeight);
+                        }
+                    }
+                    if (maxW >= 640 && maxH >= 360)
+                        cap = std::to_string(maxW) + "x" + std::to_string(maxH);
+                }
+                if (!cap.empty() && cap != "0")
+                {
+                    _putenv_s("RRV_PCSX2_GS_SNAPSHOT_MAX", cap.c_str());
+                    std::fprintf(stderr, "[pcsx2gs] per-frame picture capped at %s (screen size)\n", cap.c_str());
                 }
             }
 #endif
@@ -1248,7 +1324,7 @@ namespace ps2x::pcsx2gs
         State &s = state();
         const std::string scale = ps2x::settings::get("video", "render_scale");
         if (s.fullFrameScale >= 2 && scale != "1")
-            _putenv_s("RRV_PCSX2_GS_FULL_SCALE", scale.c_str());
+            _putenv_s("RRV_PCSX2_GS_FULL_SCALE", std::to_string(vramSafeScale(std::atoi(scale.c_str()))).c_str());
         const std::string aniso = ps2x::settings::get("video", "anisotropic");
         _putenv_s("RRV_PCSX2_GS_ANISO", aniso == "off" ? "0" : aniso.c_str());
         _putenv_s("RRV_PCSX2_GS_TEXTURE_FILTER", ps2x::settings::get("video", "texture_filter") == "bilinear" ? "bilinear" : "ps2");

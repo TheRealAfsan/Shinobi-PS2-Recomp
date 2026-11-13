@@ -2,7 +2,7 @@
 
 [![Verified developer on RecompStore](https://recompstore.com/assets/press/verified-dark.svg)](https://recompstore.com/dev/therealafsan)
 
-**v0.4.1 is out:** a brand-new launcher, mod support, DualSense HD haptics, a close-up camera and 8K. 🔥
+**v0.4.2 is out:** 4K and 8K fixed (60 fps at 8K), Vulkan works again. Plus v0.4's brand-new launcher, mod support, DualSense HD haptics, a close-up camera and 8K. 🔥
 
 <p align="center">
 <img src="docs/screenshots/v0.4/launcher-display.jpg" width="100%">
@@ -34,6 +34,11 @@ The game's own program is translated ("recompiled") to run natively on Windows. 
 
 ## v0.4: the biggest update yet
 
+> **v0.4.2: 4K and 8K fixed.** Every frame the full-size picture was copied back from the graphics card (165 MB a frame at 8K), so high resolutions ran at a few frames a second. The copy is now capped at your screen size and shrunk in steps that keep the extra detail, so 4K/8K look smoother too. 8K went from 21 to 60 fps on our test PC.
+> - **Vulkan works again:** it could not find its shader compiler and silently fell back to the slow software renderer.
+> - **Graphics cards with little video memory:** 4K/8K is lowered automatically instead of showing green/pink textures or a black screen.
+> - The launcher marks 4K as "needs a strong GPU" and 8K as "experimental".
+>
 > **v0.4.1:** the game manual is no longer included in the download. Open your own Shinobi manual PDF with the launcher's Manual button: page-turning, zoom and F4 work the same.
 
 v0.4 is here, as promised! Grab a drink.

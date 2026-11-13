@@ -962,9 +962,10 @@ L("""  keyName(e) {
 
 L("""    const RES = [['720p', '1280 x 720'], ['1080p', '1920 x 1080'], ['1440p', '2560 x 1440'], ['4K', '3840 x 2160']];""",
   """    // The PCSX2 renderer draws at a whole multiple of the PS2's 448 lines.
-    const RES = [['Native', '1x  640 x 448'], ['720p', '2x  1280 x 896'], ['1080p', '3x  1920 x 1344'], ['1440p', '4x  2560 x 1792'], ['4K', '6x  3840 x 2688']]
-      // 8K (12x): PCSX2's highest upscale, for very powerful graphics cards.
-      .concat([['8K', '12x  7680 x 5376']]);""")
+    const RES = [['Native', '1x  640 x 448'], ['720p', '2x  1280 x 896'], ['1080p', '3x  1920 x 1344'], ['1440p', '4x  2560 x 1792'], ['4K', '6x  3840 x 2688 · needs a strong GPU']]
+      // 8K (12x): PCSX2's highest upscale, for very powerful graphics cards. Lowered automatically on cards with too
+      // little video memory.
+      .concat([['8K', '12x  7680 x 5376 · experimental, high-end GPU']]);""")
 
 if guide_ids:
     for key, cap, label, _ in GUIDES:

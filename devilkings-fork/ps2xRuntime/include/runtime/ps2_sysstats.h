@@ -7,6 +7,8 @@ namespace ps2x::sysstats
 {
     // e.g. "CPU 41% | RAM 1.9 GB | VRAM 0.8 GB" (empty where the platform has no implementation).
     std::string summary();
+    // The biggest graphics card's dedicated video memory in bytes (0 when unknown).
+    double dedicatedVramBytes();
 
     // PS2X_PROFILE=1: sample where thread `tid` is executing (~1 kHz) and print the hottest functions to stderr every 10 s.
     void startProfiler(const char *label, unsigned long tid);

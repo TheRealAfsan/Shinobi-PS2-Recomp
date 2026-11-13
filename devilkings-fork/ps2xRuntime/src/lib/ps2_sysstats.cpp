@@ -135,6 +135,8 @@ namespace
     }
 
     // The dedicated-memory-biggest adapter (the discrete GPU), asked how much video memory this process uses.
+    SIZE_T g_dedicatedVram = 0; // the chosen adapter's own video memory, set with s_adapter below
+
     double processVramBytes()
     {
         static IDXGIAdapter3 *s_adapter = nullptr;
@@ -166,6 +168,7 @@ namespace
                 }
                 if (best)
                 {
+                    g_dedicatedVram = bestMemory;
                     best->QueryInterface(__uuidof(IDXGIAdapter3), reinterpret_cast<void **>(&s_adapter));
                     best->Release();
                 }
@@ -910,3 +913,14 @@ namespace ps2x::sysstats
     std::string symbolName(unsigned long long) { return std::string(); }
 }
 #endif
+
+// LOCAL PATCH (4K/8K guard): the biggest graphics card's dedicated video memory in bytes, 0 when unknown.
+double ps2x::sysstats::dedicatedVramBytes()
+{
+#if defined(_WIN32)
+    processVramBytes(); // finds the adapter once
+    return static_cast<double>(g_dedicatedVram);
+#else
+    return 0.0;
+#endif
+}

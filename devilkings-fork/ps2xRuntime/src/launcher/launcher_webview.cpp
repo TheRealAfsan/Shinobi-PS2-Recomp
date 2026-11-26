@@ -818,11 +818,11 @@ namespace
                 error = fetchError;
                 return false;
             }
-            runner = g_runner.parent_path() / "Shinobi-SSE4.exe";
+            runner = g_runner.parent_path() / widen("Shinobi-" + launcher::update::oldCpuTier() + ".exe"); // (GitHub #28: AVX or SSE4)
             if (!fs::exists(runner))
             {
                 error = "This PC's processor does not support AVX2, and the version of the game for older processors "
-                        "(bin\\Shinobi-SSE4.exe) is missing. Download the latest release again.";
+                        "(bin\\Shinobi-" + launcher::update::oldCpuTier() + ".exe) is missing. Download the latest release again.";
                 return false;
             }
             std::fprintf(stderr, "[launcher] no AVX2: starting %s\n", narrow(runner.wstring()).c_str());
@@ -1364,7 +1364,8 @@ namespace
                                      {"performance", "stats_overlay", "true"}, {"game", "hide_cinema_bars", "true"},
                                      {"game", "fair_final_boss", "true"}, {"game", "scarf_collision", "false"},
                                      {"game", "skip_intro", "true"}, {"game", "studio_intro", "false"},
-                                     {"game", "scarf_color", "original"}};
+                                     {"game", "scarf_color", "original"},
+                                     {"video", "hd_textures", "true"}}; // LOCAL PATCH: HD texture packs on from the start
         for (const auto &d : defaults)
             if (g_game.get(d[0], d[1], "").empty())
                 g_game.set(d[0], d[1], d[2]);

@@ -79,7 +79,8 @@
         "game/scarf_collision": "false",
         "game/skip_intro": "true",
         "game/studio_intro": "false",
-        "game/scarf_color": "original"
+        "game/scarf_color": "original",
+        "video/hd_textures": "true"
       }
     }
   ],

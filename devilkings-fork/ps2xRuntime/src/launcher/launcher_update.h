@@ -25,6 +25,9 @@ namespace launcher::update
         Failed,      // the download or unpacking failed (`error`); asking again tries again
     };
     // Starts the fetch when needed (in the background) and says where it is.
+    // LOCAL PATCH (GitHub #28): which game program a PC without AVX2 gets: "AVX" (AVX but no AVX2: AMD FX, Intel Sandy /
+    // Ivy Bridge) or "SSE4" (older). bin/Shinobi-<tier>.exe, release asset Shinobi-<tier>-v<version>.pack.
+    std::string oldCpuTier();
     OldCpuBuild oldCpuBuild(const std::filesystem::path &root, int *percent = nullptr, std::string *error = nullptr);
     // LOCAL PATCH (v0.7): fetches game/intro/studio_intro.mp4 (not in the zip) when the studio intro is switched on.
     // Blocking, about 2 MB; false when it could not be fetched (the game then starts without the intro).

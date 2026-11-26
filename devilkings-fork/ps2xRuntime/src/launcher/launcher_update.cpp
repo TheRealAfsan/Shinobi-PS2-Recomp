@@ -226,13 +226,22 @@ namespace launcher::update
         }
     }
 
+    std::string oldCpuTier()
+    {
+        if (_wgetenv(L"SHINOBI_FORCE_SSE4"))
+            return "SSE4";
+        return (IsProcessorFeaturePresent(39 /* PF_AVX_INSTRUCTIONS_AVAILABLE */) || _wgetenv(L"SHINOBI_FORCE_AVX")) ? "AVX" : "SSE4";
+    }
+
     OldCpuBuild oldCpuBuild(const fs::path &root, int *percent, std::string *error)
     {
+        const std::string tier = oldCpuTier();
+        const std::string name = "Shinobi-" + tier;
         const fs::path bin = root / "bin";
         const std::string version = trimmed(readFile(root / "version.txt"));
         std::error_code ec;
         std::lock_guard<std::mutex> lock(g_oldCpuLock);
-        if (fs::exists(bin / "Shinobi-SSE4.exe", ec) && trimmed(readFile(bin / "Shinobi-SSE4.version")) == version)
+        if (fs::exists(bin / (name + ".exe"), ec) && trimmed(readFile(bin / (name + ".version"))) == version)
             return OldCpuBuild::Ready;
         if (g_oldCpuBusy)
         {
@@ -250,10 +259,10 @@ namespace launcher::update
         }
         g_oldCpuBusy = true;
         g_oldCpuPercent = 0;
-        std::thread([root, bin, version]() {
+        std::thread([root, bin, version, name]() {
             std::string failure;
             std::error_code ec2;
-            const fs::path pack = bin / "Shinobi-SSE4.pack";
+            const fs::path pack = bin / (name + ".pack");
             if (!fs::exists(pack, ec2))
             {
                 std::smatch m;
@@ -263,8 +272,8 @@ namespace launcher::update
                 else
                 {
                     const std::string url = "https://github.com/" + m[1].str() + "/releases/download/v" + version +
-                                            "/Shinobi-SSE4-v" + version + ".pack";
-                    const fs::path part = bin / "Shinobi-SSE4.pack.part";
+                                            "/" + name + "-v" + version + ".pack";
+                    const fs::path part = bin / (name + ".pack.part");
                     std::fprintf(stderr, "[launcher] no AVX2: downloading %s\n", url.c_str());
                     if (get(widen(url), nullptr, &part, [](int p) { g_oldCpuPercent = p; }))
                         fs::rename(part, pack, ec2);
@@ -272,8 +281,8 @@ namespace launcher::update
                     {
                         fs::remove(part, ec2);
                         failure = "The version of the game for your processor could not be downloaded. Check your internet "
-                                  "connection and press Play again, or download Shinobi-SSE4-v" + version +
-                                  ".pack from the GitHub release page and put it in the bin folder as Shinobi-SSE4.pack.";
+                                  "connection and press Play again, or download " + name + "-v" + version +
+                                  ".pack from the GitHub release page and put it in the bin folder as " + name + ".pack.";
                     }
                 }
             }
@@ -282,7 +291,7 @@ namespace launcher::update
                 const std::string unpacked = launcher::pack::unpack(pack, bin);
                 if (unpacked.empty())
                 {
-                    std::ofstream(bin / "Shinobi-SSE4.version", std::ios::trunc) << version << "\n";
+                    std::ofstream(bin / (name + ".version"), std::ios::trunc) << version << "\n";
                     fs::remove(pack, ec2);
                 }
                 else

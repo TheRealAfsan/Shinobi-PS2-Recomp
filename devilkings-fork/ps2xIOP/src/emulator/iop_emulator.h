@@ -51,8 +51,13 @@ namespace ps2x::iop::detail
         void saveState(std::vector<uint8_t> &out) const;
         [[nodiscard]] bool loadState(const uint8_t *data, size_t size, std::string &error);
 
+        // LOCAL PATCH (performance, GitHub #28): whether the IOP runs on its own thread (see Worker in the .cpp).
+        [[nodiscard]] bool threaded() const noexcept;
+
     private:
         class Impl;
+        class Worker;
+        std::unique_ptr<Worker> m_worker; // before m_impl: the Impl is built on it (it is the Impl's host)
         std::unique_ptr<Impl> m_impl;
     };
 }

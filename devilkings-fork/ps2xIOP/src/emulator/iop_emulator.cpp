@@ -34,11 +34,33 @@
 #include <utility>
 
 #include <atomic>
+#include <condition_variable>
+#include <functional>
+#include <mutex>
+#include <thread>
+#include <type_traits>
+
+#if defined(_WIN32)
+// (only these two: windows.h would bring in macros that clash with names here)
+extern "C" __declspec(dllimport) int __stdcall SetThreadPriority(void *thread, int priority);
+extern "C" __declspec(dllimport) void *__stdcall GetCurrentThread();
+#endif
 
 namespace ps2x::iop::detail
 {
     // Host nanoseconds spent running the IOP (timed runs only: when the runtime has set deferral).
     static std::atomic<uint64_t> g_iopRunNs{0};
+    // LOCAL PATCH (GitHub #28): with the IOP on its own thread, the host time the game's thread still loses to it (waiting
+    // for the worker, running its host calls, small inline runs); that is what iopRunNanoseconds() reports then.
+    static std::atomic<uint64_t> g_iopGameNs{0};
+    static std::atomic<bool> g_iopThreaded{false};
+    static thread_local bool t_iopWorker = false;
+    static uint64_t iopNowNs() noexcept
+    {
+        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                         std::chrono::steady_clock::now().time_since_epoch())
+                                         .count());
+    }
 
     namespace
     {
@@ -132,6 +154,8 @@ namespace ps2x::iop::detail
             kernel.reset();
             modules.clear();
             imports.reset();
+            for (uint32_t &base : nativeBase)
+                base = 0u;
             rpc.reset();
             cdvd.reset();
             intrman.reset();
@@ -409,13 +433,17 @@ namespace ps2x::iop::detail
             uint32_t offset;            // from the module's base
             std::vector<uint32_t> code; // the routine as linked
             uint32_t cycles;            // what the original takes
-            void (*run)(Impl &, CpuState &);
+            bool (*run)(Impl &, CpuState &); // false: not handled (the original word is put back and interpreted)
+            uint32_t resume = 0u;       // 0: a whole routine (back to ra); else a block, continued at base + resume
         };
         static constexpr uint32_t kNativeMarker = 0x7C000000u;
+        static constexpr size_t kMaxNativeRoutines = 8u;
+        uint32_t nativeBase[kMaxNativeRoutines] = {}; // where each routine was installed (0: not)
+        uint32_t nativeExtraCycles = 0u;              // set by a routine whose cost depends on its data
 
         // CRI ADX sound driver (CRI_ADXI.IRX): the mixer's last step turns 256 accumulated
         // 32-bit samples at a0 into 16-bit ones in place, saturating to +-32767.
-        static void adxMixClampToS16(Impl &impl, CpuState &cpu)
+        static bool adxMixClampToS16(Impl &impl, CpuState &cpu)
         {
             uint32_t source = cpu.gpr[4];
             uint32_t destination = source;
@@ -426,17 +454,117 @@ namespace ps2x::iop::detail
                 impl.memory.write16(destination, static_cast<uint16_t>(clamped));
             }
             cpu.gpr[2] = 0u;
+            return true;
         }
 
         // LOCAL PATCH (performance): the same clamp compiled a second time, unoptimised, at CRI_ADXI+0x5A64 (it is what
         // the IOP spent ~60% of its time on in a stage). Same in-place clamp; it returns with v0 = 256 (its loop counter).
-        static void adxMixClampToS16Unopt(Impl &impl, CpuState &cpu)
+        static bool adxMixClampToS16Unopt(Impl &impl, CpuState &cpu)
         {
             const uint32_t start = cpu.gpr[4];
             adxMixClampToS16(impl, cpu);
             cpu.gpr[2] = 0x100u;
             cpu.gpr[3] = start + 0x400u; // v1, a0: where the loop's pointers end
             cpu.gpr[4] = start + 0x200u;
+            return true;
+        }
+
+        // LOCAL PATCH (performance, GitHub issue #28: on an FX-8350 the sound processor took 378 ms of every second, 5-10
+        // ms of each frame on the game's thread; its time was spread evenly over these few routines). Sega's sound driver
+        // (SKDRV.IRX), once a tick, asks the sequencer (MODSESQ.IRX export 11) about each of 32 slots of every track and
+        // keeps the answers as bit masks: ~70 interpreted instructions per slot. Done natively, with the same results and
+        // the same IOP cycle count.
+        //
+        // MODSESQ+0x2710 (a0 = sequencer, a1 = track): the track's slot block, or 0 when there is none.
+        static uint32_t seqTrackSlots(Impl &impl, uint32_t sequencer, uint32_t track, uint32_t &cycles)
+        {
+            if (sequencer == 0u)
+            {
+                cycles += 4u;
+                return 0u;
+            }
+            const uint32_t table = impl.memory.read32(sequencer + 4u);
+            const uint32_t index = track * 2u + 1u;
+            if (!(index < impl.memory.read32(table)))
+            {
+                cycles += 11u;
+                return 0u;
+            }
+            cycles += 18u;
+            return impl.memory.read32(index * 8u + impl.memory.read32(table + 4u) + 4u) + 0x50u;
+        }
+
+        // MODSESQ exports 11 / 12 (a0 = sequencer, a1 = track, a2 = slot): bit 1 / bit 2 of the slot's flags if the
+        // slot is in use, else -1.
+        static uint32_t seqSlotFlag(Impl &impl, uint32_t sequencer, uint32_t track, uint32_t slot, uint32_t shift,
+                                    uint32_t &cycles)
+        {
+            cycles += 7u + 2u; // prologue + call, test after it
+            const uint32_t slots = seqTrackSlots(impl, sequencer, track, cycles);
+            if (slots == 0u)
+            {
+                cycles += 5u;
+                return 0xFFFFFFFFu;
+            }
+            cycles += 7u;
+            if ((impl.memory.read32(slots + 0x14u) & (1u << (slot & 31u))) == 0u)
+            {
+                cycles += 5u;
+                return 0xFFFFFFFFu;
+            }
+            cycles += 14u;
+            return (impl.memory.read32(slots + slot * 152u + 0x88u) >> shift) & 1u;
+        }
+
+        static bool seqSlotFlagRoutine(Impl &impl, CpuState &cpu, uint32_t shift)
+        {
+            uint32_t cycles = 0u;
+            cpu.gpr[2] = seqSlotFlag(impl, cpu.gpr[4], cpu.gpr[5], cpu.gpr[6], shift, cycles);
+            impl.nativeExtraCycles = cycles;
+            return true;
+        }
+        static bool seqSlotFlag1(Impl &impl, CpuState &cpu) { return seqSlotFlagRoutine(impl, cpu, 1u); }
+        static bool seqSlotFlag2(Impl &impl, CpuState &cpu) { return seqSlotFlagRoutine(impl, cpu, 2u); }
+
+        // SKDRV+0x37f0..0x38a4 (s0 = driver): for each track (count at +0x7e4) and slot 0..31, the slot's bit in the
+        // track's mask (table at +0x7e0) set when export 11 says 1, cleared otherwise. Only while that import really is
+        // the MODSESQ code matched above (else the block is put back and interpreted).
+        static constexpr size_t kSeqSlotFlag1Id = 2u;
+        static bool skdrvSlotMasks(Impl &impl, CpuState &cpu)
+        {
+            const uint32_t target = impl.imports.resolve("modsesq", 11u);
+            if (target == 0u || impl.nativeBase[kSeqSlotFlag1Id] == 0u ||
+                IopMemory::physicalAddress(target) != IopMemory::physicalAddress(impl.nativeBase[kSeqSlotFlag1Id] + 0x2614u))
+                return false;
+            const uint32_t driver = cpu.gpr[16];
+            const uint32_t sequencer = driver + 0x748u;
+            uint32_t cycles = 3u + 5u;
+            uint32_t track = 0u;
+            while (static_cast<int32_t>(track) < static_cast<int32_t>(impl.memory.read32(driver + 0x7E4u)))
+            {
+                cycles += 6u + 6u; // the track loop's own instructions: into the slot loop, and after it
+                for (uint32_t slot = 0u; slot < 32u; ++slot)
+                {
+                    const uint32_t bit = 1u << slot;
+                    cycles += 7u + 1u + 3u + 4u; // call, import stub, test, loop
+                    const uint32_t flag = seqSlotFlag(impl, sequencer, track, slot, 1u, cycles);
+                    const uint32_t entry = impl.memory.read32(driver + 0x7E0u) + track * 4u;
+                    const uint32_t mask = impl.memory.read32(entry);
+                    impl.memory.write32(entry, flag == 1u ? (mask | bit) : (mask & ~bit));
+                    cycles += flag == 1u ? 10u : 9u;
+                }
+                cpu.gpr[18] = 32u;          // s2
+                cpu.gpr[19] = 1u << 31;     // s3
+                cpu.gpr[5] = track * 2u + 1u;   // a1..a3 as the last call left them (its helper's index, its locals)
+                cpu.gpr[6] = cpu.gpr[29] - 0x10u;
+                cpu.gpr[7] = cpu.gpr[29] - 0x0Cu;
+                cpu.gpr[31] = cpu.pc + (0x3824u - 0x37F0u); // ra: after the call (cpu.pc is still this block's start)
+                ++track;
+            }
+            cpu.gpr[17] = track; // s1
+            cpu.gpr[2] = 0u;     // v0: the last loop test
+            impl.nativeExtraCycles = cycles;
+            return true;
         }
 
         static const std::vector<NativeRoutine> &nativeRoutines()
@@ -458,8 +586,54 @@ namespace ps2x::iop::detail
                   0x080016CBu, 0x00000000u, 0x24420001u, 0x080016A0u, 0x00000000u, 0x03C0E821u, 0x8FBE0000u, 0x27BD0008u,
                   0x03E00008u, 0x00000000u},
                  256u * 23u + 14u, &Impl::adxMixClampToS16Unopt},
+                // (kSeqSlotFlag1Id = 2) MODSESQ export 11, with its helper at +0x2710 checked too (see below)
+                {"MODSESQ", 0x2614u,
+                 {0x27BDFFE0u, 0xAFB00018u, 0x00C08021u, 0x27A60010u, 0xAFBF001Cu, 0x0C0009C4u, 0x27A70014u, 0x10400012u,
+                  0x24020001u, 0x8FA40014u, 0x00000000u, 0x8C830014u, 0x02021004u, 0x00621824u, 0x1060000Bu, 0x00101080u,
+                  0x00501021u, 0x00021080u, 0x00501023u, 0x000210C0u, 0x00821021u, 0x8C420088u, 0x00000000u, 0x00021042u,
+                  0x080009A0u, 0x30420001u, 0x2402FFFFu, 0x8FBF001Cu, 0x8FB00018u, 0x03E00008u, 0x27BD0020u},
+                 0u, &Impl::seqSlotFlag1},
+                // MODSESQ export 12 (bit 2)
+                {"MODSESQ", 0x2690u,
+                 {0x27BDFFE0u, 0xAFB00018u, 0x00C08021u, 0x27A60010u, 0xAFBF001Cu, 0x0C0009C4u, 0x27A70014u, 0x10400012u,
+                  0x24020001u, 0x8FA40014u, 0x00000000u, 0x8C830014u, 0x02021004u, 0x00621824u, 0x1060000Bu, 0x00101080u,
+                  0x00501021u, 0x00021080u, 0x00501023u, 0x000210C0u, 0x00821021u, 0x8C420088u, 0x00000000u, 0x00021082u,
+                  0x080009BFu, 0x30420001u, 0x2402FFFFu, 0x8FBF001Cu, 0x8FB00018u, 0x03E00008u, 0x27BD0020u},
+                 0u, &Impl::seqSlotFlag2},
+                // SKDRV's per-tick slot masks: a block inside its update routine, continued at +0x38a4
+                {"SKDRV", 0x37F0u,
+                 {0x00008821u, 0x10000026u, 0x00000000u, 0x00009021u, 0x1000001Fu, 0x00000000u, 0x24020001u, 0x02429804u,
+                  0x26040748u, 0x02202821u, 0x02403021u, 0x0C000094u, 0x00000000u, 0x24030001u, 0x1443000Bu, 0x00000000u,
+                  0x00111880u, 0x8E0207E0u, 0x00000000u, 0x00431821u, 0x8C620000u, 0x00000000u, 0x00531025u, 0xAC620000u,
+                  0x1000000Au, 0x00000000u, 0x00111880u, 0x8E0207E0u, 0x00000000u, 0x00432021u, 0x02601827u, 0x8C820000u,
+                  0x00000000u, 0x00431024u, 0xAC820000u, 0x26520001u, 0x2A420020u, 0x1440FFE0u, 0x00000000u, 0x26310001u,
+                  0x8E0207E4u, 0x00000000u, 0x0222102Au, 0x1440FFD7u, 0x00000000u},
+                 0u, &Impl::skdrvSlotMasks, 0x38A4u},
             };
             return s_routines;
+        }
+
+        // MODSESQ+0x2710, the helper both exports call (the natives above do its work too)
+        static const std::vector<uint32_t> &seqTrackSlotsCode()
+        {
+            static const std::vector<uint32_t> s_code = {
+                0x10800011u, 0x00051840u, 0x8C840004u, 0x00000000u, 0x8C820000u, 0x24650001u, 0x00A2102Bu, 0x1040000Au,
+                0x000518C0u, 0x8C820004u, 0x00000000u, 0x00621821u, 0x8C630004u, 0x24020001u, 0xACC30000u, 0x24630050u,
+                0x03E00008u, 0xACE30000u, 0x03E00008u, 0x00001021u};
+            return s_code;
+        }
+
+        bool codeMatches(uint32_t address, const std::vector<uint32_t> &code) const
+        {
+            for (size_t i = 0; i < code.size(); ++i)
+            {
+                const uint32_t expected = code[i];
+                const uint32_t actual = memory.read32(address + static_cast<uint32_t>(i) * 4u);
+                const bool jump = (expected >> 26) == 2u || (expected >> 26) == 3u;
+                if (jump ? (actual >> 26) != (expected >> 26) : actual != expected)
+                    return false;
+            }
+            return true;
         }
 
         // PS2X_IOP_NATIVE=0 keeps every routine interpreted.
@@ -480,17 +654,14 @@ namespace ps2x::iop::detail
                     routine.offset + routine.code.size() * 4u > module.size)
                     continue;
                 const uint32_t address = module.base + routine.offset;
-                bool matches = true;
-                for (size_t i = 0; i < routine.code.size() && matches; ++i)
-                {
-                    const uint32_t expected = routine.code[i];
-                    const uint32_t actual = memory.read32(address + static_cast<uint32_t>(i) * 4u);
-                    const bool jump = (expected >> 26) == 2u || (expected >> 26) == 3u;
-                    matches = jump ? (actual >> 26) == (expected >> 26) : actual == expected;
-                }
-                if (!matches)
+                if (id >= kMaxNativeRoutines || !codeMatches(address, routine.code))
+                    continue;
+                // the sequencer's exports read their slots through the helper at +0x2710: it must match too
+                if (routine.module[0] == 'M' && (0x2710u + seqTrackSlotsCode().size() * 4u > module.size ||
+                                                 !codeMatches(module.base + 0x2710u, seqTrackSlotsCode())))
                     continue;
                 memory.write32(address, kNativeMarker | static_cast<uint32_t>(id));
+                nativeBase[id] = module.base;
                 std::ostringstream out;
                 out << "[IOP] native " << routine.module << "+0x" << std::hex << routine.offset;
                 log(LogLevel::Info, out.str());
@@ -524,10 +695,17 @@ namespace ps2x::iop::detail
                 if (id < nativeRoutines().size())
                 {
                     const NativeRoutine &routine = nativeRoutines()[id];
-                    routine.run(*this, cpu);
-                    totalInstructions += routine.cycles;
-                    totalCycles += routine.cycles;
-                    cpu.pc = cpu.gpr[31];
+                    nativeExtraCycles = 0u;
+                    if (!routine.run(*this, cpu))
+                    {
+                        // not this time (e.g. its import now goes elsewhere): the original code from now on
+                        memory.write32(cpu.pc, routine.code[0]);
+                        return true;
+                    }
+                    const uint32_t cycles = routine.cycles + nativeExtraCycles;
+                    totalInstructions += cycles;
+                    totalCycles += cycles;
+                    cpu.pc = routine.resume ? cpu.pc - routine.offset + routine.resume : cpu.gpr[31];
                     cpu.branchPending = false;
                     return !cpu.stopped;
                 }
@@ -594,6 +772,35 @@ namespace ps2x::iop::detail
             std::fprintf(stderr, "[iop-pc] %.1f M instructions/s, %llu samples\n",
                          static_cast<double>(totalInstructions - s_lastInstructions) / seconds / 1.0e6,
                          static_cast<unsigned long long>(total));
+            // LOCAL PATCH (GitHub #28): first by 256-byte stretch of each module (roughly one routine or loop): code whose
+            // time is spread over many addresses never reaches the per-address list below.
+            {
+                std::map<std::pair<std::string, uint32_t>, uint64_t> regions;
+                for (const auto &[count, address] : ranked)
+                {
+                    const uint32_t phys = address & 0x1FFFFFFFu;
+                    std::pair<std::string, uint32_t> key{"?", phys & ~0xFFu};
+                    for (const auto &[id, module] : modules)
+                    {
+                        if (phys >= module.base && phys < module.base + module.size)
+                        {
+                            key = {module.name, (phys - module.base) & ~0xFFu};
+                            break;
+                        }
+                    }
+                    regions[key] += count;
+                }
+                std::vector<std::pair<uint64_t, std::pair<std::string, uint32_t>>> byRegion;
+                for (const auto &[key, count] : regions)
+                    byRegion.push_back({count, key});
+                std::sort(byRegion.begin(), byRegion.end(),
+                          [](const auto &a, const auto &b) { return a.first > b.first; });
+                for (size_t i = 0; i < byRegion.size() && i < 12u; ++i)
+                    std::fprintf(stderr, "[iop-region] %5.1f%%  %s+%x..%x\n",
+                                 100.0 * static_cast<double>(byRegion[i].first) / static_cast<double>(total),
+                                 byRegion[i].second.first.c_str(), byRegion[i].second.second,
+                                 byRegion[i].second.second + 0xFFu);
+            }
             for (size_t i = 0; i < ranked.size() && i < 16u; ++i)
             {
                 const uint32_t address = ranked[i].second;
@@ -1033,6 +1240,8 @@ namespace ps2x::iop::detail
             const uint64_t ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count());
             workNs += ns;
             g_iopRunNs.fetch_add(ns, std::memory_order_relaxed);
+            if (!t_iopWorker)
+                g_iopGameNs.fetch_add(ns, std::memory_order_relaxed);
             hotWindowNs += ns;
             if (hotWindowStart == std::chrono::steady_clock::time_point{})
                 hotWindowStart = end;
@@ -1094,38 +1303,317 @@ namespace ps2x::iop::detail
         GuestCallback checkKelfPathCallback;
     };
 
-    IopEmulator::IopEmulator(IopHost &host)
-        : m_impl(std::make_unique<Impl>(host))
+    // LOCAL PATCH (performance, GitHub #28: on an AMD FX-8350 the IOP took 5-10 ms of every frame on the game's thread,
+    // which put fights at 30 fps). The IOP's batched cycles run on a thread of their own while the game goes on.
+    //  - The game's thread hands the cycles over at its checkpoints (runEeCycles) instead of running them.
+    //  - Every other way in (RPC, SIF transfers, IOP memory, module loads, save states, the game's idle point) first
+    //    waits for the worker to finish (join), then works exactly as before: the IOP is at the EE's time there.
+    //  - The worker is the Impl's host. Host calls that touch the game's side (SIF commands to the EE, memory card,
+    //    sound commands, the EE heap, RPC handles, path lookups) are run by the game's thread, at its next checkpoint or
+    //    while it waits in join; the worker waits for the result. Calls back into the IOP from inside such a call do not
+    //    wait (the worker is stopped in the middle of its run, as the inline IOP was before). Guest memory copies, host
+    //    file reads and logging run on the worker directly.
+    // PS2X_IOP_THREAD=0 turns it off, =1 on; unset: on with 6 or more logical CPUs.
+    class IopEmulator::Worker final : public IopHost
     {
+    public:
+        explicit Worker(IopHost &host) : m_host(host)
+        {
+            const char *value = std::getenv("PS2X_IOP_THREAD");
+            if (value && value[0] != '\0')
+                enabled = value[0] != '0';
+            else
+                enabled = std::thread::hardware_concurrency() >= 6u;
+        }
+        ~Worker() override { stop(); }
+
+        bool enabled = false;
+
+        void start(Impl *impl)
+        {
+            if (!enabled || m_thread.joinable())
+                return;
+            m_impl = impl;
+            m_thread = std::thread([this]() { loop(); });
+            m_id = m_thread.get_id();
+        }
+
+        void stop()
+        {
+            if (!m_thread.joinable())
+                return;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_stop = true;
+            }
+            m_wake.notify_all();
+            m_proxyCv.notify_all();
+            m_thread.join();
+        }
+
+        bool onWorker() const { return m_thread.joinable() && std::this_thread::get_id() == m_id; }
+
+        // Game's side: hand cycles over. Too many waiting (the worker is slower than the game): wait for it.
+        void submit(uint64_t iopCycles)
+        {
+            constexpr uint64_t kMaxQueued = 1228800u; // two frames of IOP time
+            std::unique_lock<std::mutex> lock(m_mutex);
+            m_work += iopCycles;
+            if (!m_busy)
+            {
+                m_busy = true;
+                m_wake.notify_one();
+            }
+            if (m_work > kMaxQueued)
+            {
+                lock.unlock();
+                join();
+            }
+        }
+
+        // Game's side: a host call the worker is waiting on, if any.
+        void servicePending() const
+        {
+            if (!m_callPosted.load(std::memory_order_acquire) || onWorker())
+                return;
+            const uint64_t start = iopNowNs();
+            std::unique_lock<std::mutex> lock(m_mutex);
+            if (m_call)
+                runCall(lock);
+            lock.unlock();
+            g_iopGameNs.fetch_add(iopNowNs() - start, std::memory_order_relaxed);
+        }
+
+        // Game's side: wait until the worker has run everything handed to it (running its host calls meanwhile).
+        void join() const
+        {
+            if (!m_thread.joinable() || onWorker() || m_inCall > 0)
+                return;
+            const uint64_t start = iopNowNs();
+            std::unique_lock<std::mutex> lock(m_mutex);
+            if (!m_busy && !m_work)
+                return;
+            while (m_busy || m_work)
+            {
+                if (m_call)
+                {
+                    runCall(lock);
+                    continue;
+                }
+                m_eeCv.wait(lock, [this]() { return (!m_busy && !m_work) || m_call != nullptr; });
+            }
+            lock.unlock();
+            g_iopGameNs.fetch_add(iopNowNs() - start, std::memory_order_relaxed);
+        }
+
+        // ---- IopHost: memory copies, files and logs straight through; the rest on the game's thread
+        bool readGuest(uint32_t address, void *destination, size_t size) const override { return m_host.readGuest(address, destination, size); }
+        bool writeGuest(uint32_t address, const void *source, size_t size) override { return m_host.writeGuest(address, source, size); }
+        bool zeroGuest(uint32_t address, size_t size) override { return m_host.zeroGuest(address, size); }
+        bool normalizeGuestAddress(uint32_t address, uint32_t &normalized) const override { return m_host.normalizeGuestAddress(address, normalized); }
+        bool readIopMemory(uint32_t address, void *destination, size_t size) const override { return m_host.readIopMemory(address, destination, size); }
+        bool writeIopMemory(uint32_t address, const void *source, size_t size) override { return m_host.writeIopMemory(address, source, size); }
+        bool zeroIopMemory(uint32_t address, size_t size) override { return m_host.zeroIopMemory(address, size); }
+        bool normalizeIopAddress(uint32_t address, uint32_t &normalized) const override { return m_host.normalizeIopAddress(address, normalized); }
+        uint32_t allocateIopHandle(IopHandleKind kind) override { return proxied([&]() { return m_host.allocateIopHandle(kind); }); }
+        uint32_t allocateGuest(uint32_t size, uint32_t alignment) override { return proxied([&]() { return m_host.allocateGuest(size, alignment); }); }
+        void freeGuest(uint32_t address) override { proxied([&]() { m_host.freeGuest(address); }); }
+        void audioCommand(uint32_t sid, uint32_t function, GuestBuffer send, GuestBuffer receive) override
+        {
+            proxied([&]() { m_host.audioCommand(sid, function, send, receive); });
+        }
+        std::string hostPath(HostPathKind kind) const override { return proxied([&]() { return m_host.hostPath(kind); }); }
+        std::string translateGuestPath(std::string_view path) const override { return proxied([&]() { return m_host.translateGuestPath(path); }); }
+        uint64_t openHostFile(std::string_view path) override { return m_host.openHostFile(path); }
+        bool hostFileSize(uint64_t handle, uint64_t &size) const override { return m_host.hostFileSize(handle, size); }
+        bool readHostFile(uint64_t handle, uint64_t offset, void *destination, size_t size, size_t &bytesRead) override
+        {
+            return m_host.readHostFile(handle, offset, destination, size, bytesRead);
+        }
+        void closeHostFile(uint64_t handle) override { m_host.closeHostFile(handle); }
+        int32_t memoryCard(const MemoryCardRequest &request) override { return proxied([&]() { return m_host.memoryCard(request); }); }
+        bool hasGuestFunction(uint32_t address) const override { return m_host.hasGuestFunction(address); }
+        bool invokeGuestFunction(uint64_t callToken, uint32_t address, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3,
+                                 uint32_t *resultAddress) override
+        {
+            return proxied([&]() { return m_host.invokeGuestFunction(callToken, address, a0, a1, a2, a3, resultAddress); });
+        }
+        bool sendSifCommand(uint32_t commandId, const void *packet, size_t packetSize) override
+        {
+            return proxied([&]() { return m_host.sendSifCommand(commandId, packet, packetSize); });
+        }
+        void log(LogLevel level, std::string_view message) override { m_host.log(level, message); }
+
+    private:
+        void loop();
+
+        // The game's thread runs the posted call (lock held on entry and on return).
+        void runCall(std::unique_lock<std::mutex> &lock) const
+        {
+            const std::function<void()> *call = m_call;
+            m_call = nullptr;
+            m_callPosted.store(false, std::memory_order_release);
+            lock.unlock();
+            ++m_inCall;
+            (*call)();
+            --m_inCall;
+            lock.lock();
+            m_callDone = true;
+            m_proxyCv.notify_all();
+        }
+
+        template <class F>
+        auto proxied(F &&f) const -> decltype(f())
+        {
+            using R = decltype(f());
+            if (!onWorker())
+                return f();
+            if constexpr (std::is_void_v<R>)
+            {
+                const std::function<void()> call = [&]() { f(); };
+                post(call);
+            }
+            else
+            {
+                R result{};
+                const std::function<void()> call = [&]() { result = f(); };
+                post(call);
+                return result;
+            }
+        }
+
+        void post(const std::function<void()> &call) const
+        {
+            std::unique_lock<std::mutex> lock(m_mutex);
+            if (m_stop)
+            {
+                lock.unlock();
+                call(); // shutting down: nobody on the game's side any more
+                return;
+            }
+            m_call = &call;
+            m_callDone = false;
+            m_callPosted.store(true, std::memory_order_release);
+            m_eeCv.notify_all();
+            m_proxyCv.wait(lock, [this]() { return m_callDone || m_stop; });
+            if (!m_callDone)
+            {
+                m_call = nullptr;
+                m_callPosted.store(false, std::memory_order_release);
+                lock.unlock();
+                call();
+            }
+        }
+
+        IopHost &m_host;
+        Impl *m_impl = nullptr;
+        std::thread m_thread;
+        std::thread::id m_id{};
+        mutable std::mutex m_mutex;
+        mutable std::condition_variable m_wake;    // worker: work or stop
+        mutable std::condition_variable m_eeCv;    // game's side: worker idle, or a call posted
+        mutable std::condition_variable m_proxyCv; // worker: its posted call done
+        uint64_t m_work = 0;                       // IOP cycles handed over and not yet taken
+        bool m_busy = false;                       // the worker has work (taken or not)
+        bool m_stop = false;
+        mutable const std::function<void()> *m_call = nullptr;
+        mutable bool m_callDone = false;
+        mutable std::atomic<bool> m_callPosted{false};
+        mutable int m_inCall = 0;                  // game's thread inside a posted call (only it touches this)
+    };
+
+    void IopEmulator::Worker::loop()
+    {
+        t_iopWorker = true;
+#if defined(_WIN32)
+        // above normal, as the game's and the VIF1 threads are: the game waits for this one at its sync points
+        SetThreadPriority(GetCurrentThread(), 1 /* THREAD_PRIORITY_ABOVE_NORMAL */);
+#endif
+        std::unique_lock<std::mutex> lock(m_mutex);
+        for (;;)
+        {
+            m_wake.wait(lock, [this]() { return m_stop || m_work != 0u; });
+            if (m_stop)
+                break;
+            const uint64_t cycles = m_work;
+            m_work = 0u;
+            lock.unlock();
+            m_impl->timedRun(cycles);
+            lock.lock();
+            if (m_work == 0u)
+            {
+                m_busy = false;
+                m_eeCv.notify_all();
+            }
+        }
+        m_busy = false;
+        m_eeCv.notify_all();
     }
 
-    IopEmulator::~IopEmulator() = default;
+    IopEmulator::IopEmulator(IopHost &host)
+        : m_worker(std::make_unique<Worker>(host)),
+          m_impl(std::make_unique<Impl>(*m_worker))
+    {
+        m_worker->start(m_impl.get());
+        g_iopThreaded.store(m_worker->enabled, std::memory_order_relaxed);
+        if (m_worker->enabled)
+            std::fprintf(stderr, "[iop] sound processor on its own thread (PS2X_IOP_THREAD=0 to keep it on the game's)\n");
+    }
+
+    IopEmulator::~IopEmulator()
+    {
+        m_worker->join();
+        m_worker->stop(); // before the Impl it runs goes
+    }
+
+    bool IopEmulator::threaded() const noexcept
+    {
+        return m_worker->enabled;
+    }
 
     void IopEmulator::reset()
     {
+        m_worker->join();
         m_impl->reset();
     }
 
     ModuleLoadResult IopEmulator::loadModule(std::string_view path, const void *arguments, uint32_t argumentSize)
     {
+        m_worker->join();
         m_impl->flushPendingEeCycles();
         return m_impl->loadModule(path, arguments, argumentSize);
     }
 
     ModuleLoadResult IopEmulator::loadModuleBuffer(uint32_t guestAddress, const void *arguments, uint32_t argumentSize)
     {
+        m_worker->join();
         m_impl->flushPendingEeCycles();
         return m_impl->loadModuleBuffer(guestAddress, arguments, argumentSize);
     }
 
     bool IopEmulator::stopModule(int32_t moduleId, int32_t *result)
     {
+        m_worker->join();
         m_impl->flushPendingEeCycles();
         return m_impl->stopModule(moduleId, result);
     }
 
     void IopEmulator::runEeCycles(uint64_t eeCycles) noexcept
     {
+        if (m_worker->enabled && !m_worker->onWorker())
+        {
+            m_worker->servicePending();
+            constexpr uint64_t kThreadBatchCycles = 8192u; // ~0.2 ms of IOP time per hand-over
+            const uint64_t total = m_impl->eeCycleCarry + eeCycles;
+            if (total / 8u < kThreadBatchCycles)
+            {
+                m_impl->eeCycleCarry = total;
+                return;
+            }
+            m_impl->eeCycleCarry = total % 8u;
+            m_worker->submit(total / 8u);
+            return;
+        }
         // The EE scheduler reports progress every few dozen cycles (each guest
         // loop checkpoint). Running the IOP scheduler for a handful of cycles per
         // call costs far more than the emulated work, so batch small advances.
@@ -1164,55 +1652,77 @@ namespace ps2x::iop::detail
 
     void IopEmulator::idleFlush() noexcept
     {
+        if (m_worker->enabled && !m_worker->onWorker())
+        {
+            // the game has nothing to run: the IOP catches up to the EE's time before it sleeps, as inline
+            const uint64_t iopCycles = m_impl->eeCycleCarry / 8u;
+            if (iopCycles)
+            {
+                m_impl->eeCycleCarry %= 8u;
+                m_worker->submit(iopCycles);
+            }
+            m_worker->join();
+            m_impl->workNs = 0u;
+            return;
+        }
         m_impl->idleFlush();
     }
 
     uint64_t iopRunNanoseconds() noexcept
     {
-        return g_iopRunNs.load(std::memory_order_relaxed);
+        return g_iopThreaded.load(std::memory_order_relaxed) ? g_iopGameNs.load(std::memory_order_relaxed)
+                                                             : g_iopRunNs.load(std::memory_order_relaxed);
     }
 
     RpcResult IopEmulator::handleRpc(const RpcRequest &request)
     {
+        m_worker->join();
         m_impl->flushPendingEeCycles();
         return m_impl->rpc.handleRpc(request, *m_impl);
     }
 
     bool IopEmulator::hasRpcServer(uint32_t sid) const noexcept
     {
+        m_worker->join();
         return m_impl->rpc.hasServer(sid);
     }
 
     void IopEmulator::onSifTransfer(const SifTransfer &transfer)
     {
+        m_worker->join();
         m_impl->flushPendingEeCycles();
         m_impl->rpc.onSifTransfer(transfer);
     }
 
     uint32_t IopEmulator::allocateMemory(uint32_t size, uint32_t alignment)
     {
+        m_worker->join();
         return m_impl->memory.allocate(size, alignment);
     }
 
     bool IopEmulator::freeMemory(uint32_t address)
     {
+        m_worker->join();
         return m_impl->memory.freeAllocation(address);
     }
 
     bool IopEmulator::readMemory(uint32_t address, void *destination, size_t size) const
     {
+        m_worker->join();
         return isMemoryRange(address, size) &&
                m_impl->memory.readRam(address, destination, size);
     }
 
     bool IopEmulator::writeMemory(uint32_t address, const void *source, size_t size)
     {
+        m_worker->join();
         return isMemoryRange(address, size) &&
                m_impl->memory.writeRam(address, source, size);
     }
 
     bool IopEmulator::zeroMemory(uint32_t address, size_t size)
     {
+        m_worker->join();
         return isMemoryRange(address, size) &&
                m_impl->memory.zeroRam(address, size);
     }
@@ -1509,6 +2019,7 @@ namespace ps2x::iop::detail
 
     bool IopEmulator::saveStateClean(std::string &why) const
     {
+        m_worker->join();
         const Impl &d = *m_impl;
         if (d.activeCpu || d.callDepth != 0u || d.servicingDmaInterrupts || d.servicingGuestCallbacks)
         {
@@ -1520,6 +2031,7 @@ namespace ps2x::iop::detail
 
     void IopEmulator::saveState(std::vector<uint8_t> &bytes) const
     {
+        m_worker->join();
         const Impl &d = *m_impl;
         ps2x::savestate::Writer out;
         out.section("iop");
@@ -1552,6 +2064,7 @@ namespace ps2x::iop::detail
 
     bool IopEmulator::loadState(const uint8_t *data, size_t size, std::string &error)
     {
+        m_worker->join();
         Impl &d = *m_impl;
         ps2x::savestate::Reader in(data, size);
         if (!in.section("iop"))

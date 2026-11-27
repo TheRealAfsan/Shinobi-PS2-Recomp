@@ -26,6 +26,11 @@ namespace ps2x::bars
             bool black;
             bool tex;
             uint32_t rgb;
+            // LOCAL PATCH (black strips): where its colour was written in this packet (kind 0: not in it, 1: a register
+            // value, 2: a packed RGBAQ) and its texture function then
+            uint32_t colOffset;
+            uint8_t colKind;
+            uint8_t tfx;
         };
 
         struct Walker
@@ -71,9 +76,11 @@ namespace ps2x::bars
                     runFirst = static_cast<uint32_t>(verts.size());
                 }
                 verts.push_back({yOffset, static_cast<int32_t>(x) - st.ofx[ctx()], static_cast<int32_t>(y) - st.ofy[ctx()], y,
-                                 black && !textured(), textured(), colour});
+                                 black && !textured(), textured(), colour, colOffset, colKind, st.tfx[ctx()]});
             }
             uint32_t colour = 0;
+            uint32_t colOffset = 0;
+            uint8_t colKind = 0;
             uint32_t primType = 0;
             std::vector<uint32_t> runType; // prim type of each run
             std::vector<std::pair<uint32_t, uint64_t>> scissors; // where the value sits, value
@@ -95,6 +102,12 @@ namespace ps2x::bars
                 case 0x01: // RGBAQ
                     rgba(static_cast<uint32_t>(value & 0xFFu), static_cast<uint32_t>((value >> 8) & 0xFFu),
                          static_cast<uint32_t>((value >> 16) & 0xFFu));
+                    colOffset = offset;
+                    colKind = 1u;
+                    break;
+                case 0x06:
+                case 0x07: // TEX0_1/2: TFX
+                    st.tfx[address - 0x06u] = static_cast<uint8_t>((value >> 35) & 3u);
                     break;
                 case 0x04: // XYZF2
                 case 0x05: // XYZ2
@@ -136,6 +149,8 @@ namespace ps2x::bars
                 case 0x01: // RGBAQ packed: R lo[7:0], G lo[39:32], B hi[7:0]
                     rgba(static_cast<uint32_t>(lo & 0xFFu), static_cast<uint32_t>((lo >> 32) & 0xFFu),
                          static_cast<uint32_t>(hi & 0xFFu));
+                    colOffset = offset;
+                    colKind = 2u;
                     break;
                 case 0x04:
                 case 0x05:
@@ -203,7 +218,8 @@ namespace ps2x::bars
         };
     }
 
-    const uint8_t *apply(const uint8_t *data, uint32_t size, const State &state, std::vector<uint8_t> &scratch)
+    const uint8_t *apply(const uint8_t *data, uint32_t size, const State &state, std::vector<uint8_t> &scratch,
+                         bool removeBands)
     {
         thread_local std::vector<Vertex> verts;
         thread_local std::vector<std::pair<uint32_t, uint32_t>> runs;
@@ -211,6 +227,7 @@ namespace ps2x::bars
         runs.clear();
         Walker w{state, verts, runs};
         w.walk(data, size);
+        if (removeBands)
         {
             static std::vector<uint64_t> s_all;
             for (const auto &sc : w.scissors)
@@ -241,6 +258,50 @@ namespace ps2x::bars
             // In pixels of the game's frame (640 wide; 448 or 224 lines).
             const float wPx = (x1 - x0) / 16.0f, top = y0 / 16.0f, bottom = y1 / 16.0f, hPx = bottom - top;
             const bool wide = wPx >= 600.0f;
+            // LOCAL PATCH (black strips, user 2026-11-27: "should be black bars there"): with the bars kept (IMAX mode off)
+            // the game's stage-intro strips - textured, frame-wide, 640 x 24 at the top / 640 x 45 at the bottom, the same
+            // ones IMAX mode removes - came out red / orange. They are drawn black: their colour set to black (the texture
+            // is multiplied by it), or, when that cannot be done here (texture not multiplied by the colour, colour not
+            // in this packet), the strip is left out. Nothing else is touched in this mode.
+            if (!removeBands)
+            {
+                const float left = x0 / 16.0f;
+                const bool strip = verts[first].tex && count <= 4u && left >= -4.0f && left <= 4.0f && wPx >= 630.0f &&
+                                   wPx <= 650.0f && hPx >= 12.0f && hPx <= 64.0f &&
+                                   ((top >= -2.0f && top <= 2.0f) || (bottom >= 216.0f && bottom <= 240.0f && top >= 160.0f));
+                if (!strip)
+                    continue;
+                bool colourable = true;
+                for (uint32_t i = 0; i < count; ++i)
+                    colourable = colourable && verts[first + i].colKind != 0u && verts[first + i].tfx == 0u;
+                if (!copied)
+                {
+                    scratch.assign(data, data + size);
+                    copied = true;
+                }
+                for (uint32_t i = 0; i < count; ++i)
+                {
+                    const Vertex &v = verts[first + i];
+                    if (colourable && v.colKind == 1u)
+                        std::memset(scratch.data() + v.colOffset, 0, 3); // R, G, B of the register value
+                    else if (colourable && v.colKind == 2u)
+                    {
+                        scratch[v.colOffset] = 0;      // R
+                        scratch[v.colOffset + 4u] = 0; // G
+                        scratch[v.colOffset + 8u] = 0; // B
+                    }
+                    else if (!colourable)
+                        std::memcpy(scratch.data() + v.offset, &verts[first].rawY, 2); // zero height: left out
+                }
+                static int s_told = 0;
+                if (s_told < 6)
+                {
+                    ++s_told;
+                    std::fprintf(stderr, "[bars] stage strip %.0f x %.0f at y %.0f..%.0f drawn black (%s)\n", wPx, hPx, top,
+                                 bottom, colourable ? "colour" : "left out");
+                }
+                continue;
+            }
             // Research: every distinct shape touching the top or bottom edge (any colour, textured or not), once.
             {
                 static std::vector<uint64_t> s_edgeSeen;

@@ -985,8 +985,11 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
     }
 
     // LOCAL PATCH (cinematic bars mod): letterbox bands taken out of the drawing (gs_bars.cpp).
-    if (ps2xCinemaBarsHidden() && !ps2xKeepBars())
+    // LOCAL PATCH (black strips, user 2026-11-27): with the bars kept, the stage-intro strips (textured, red / orange
+    // with HD textures) are drawn black, as the bars around them are.
+    if (!ps2xKeepBars())
     {
+        const bool removeBands = ps2xCinemaBarsHidden();
         ps2x::bars::State barsState;
         barsState.primCtxt = m_primRegister.ctxt;
         barsState.prmodeCtxt = m_prmodeRegister.ctxt;
@@ -998,9 +1001,10 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
             barsState.ofx[i] = m_ctx[i].xyoffset.ofx;
             barsState.ofy[i] = m_ctx[i].xyoffset.ofy;
             barsState.width[i] = m_ctx[i].frame.fbw * 64u;
+            barsState.tfx[i] = m_ctx[i].tex0.tfx;
         }
         thread_local std::vector<uint8_t> s_barsScratch;
-        data = ps2x::bars::apply(data, sizeBytes, barsState, s_barsScratch);
+        data = ps2x::bars::apply(data, sizeBytes, barsState, s_barsScratch, removeBands);
     }
 
     if (ps2x::pgs::active())
